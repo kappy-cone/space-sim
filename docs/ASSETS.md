@@ -1,8 +1,17 @@
 # Asset integration — scoping
 
 A concrete plan for bringing external 3-D art into the sim, with effort,
-the dependency question, and a recommendation. **Nothing here is
-implemented yet** — the repo is 100% procedural meshes today.
+the dependency question, and a recommendation.
+
+## Status: Option A is now implemented
+
+The zero-dep `.glb` mesh loader (`src/gl/glb.ts`, tested in `glb.test.ts`)
+is built, and a real **CC0 Quaternius jet** ("Spitfire" from the Ultimate
+Spaceships pack) flies the dogfight — team-tinted, loaded async with a
+procedural fallback. Provenance: `public/models/CREDITS.md`; the source
+OBJ was converted with the build-time `scripts/obj2glb.cjs`. No runtime
+dependency was added. The sections below are the original scoping that
+led to that choice, kept for the remaining options.
 
 ## The one real blocker: it breaks the tiny-deps rule
 

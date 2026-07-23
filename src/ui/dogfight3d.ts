@@ -9,8 +9,9 @@
 
 import { Dogfight, Fighter, Missile } from '../combat/dogfight';
 import { OrbitCamera } from '../gl/camera';
-import { Mat4, multiply, rotationY, rotationZ, scaling, scalingXYZ, translation, v3, V3 } from '../gl/mat4';
+import { Mat4, identity, multiply, rotationY, rotationZ, scaling, scalingXYZ, translation, v3, V3 } from '../gl/mat4';
 import { MeshData, gridMesh } from '../gl/mesh';
+import { loadGlbMesh } from '../gl/glb';
 import { Renderer } from '../gl/renderer';
 
 /** Visual altitude of the fight above the ground grid [m]. */
@@ -50,6 +51,25 @@ function triMesh(tris: Tri[]): MeshData {
     indices[i * 3] = i * 3; indices[i * 3 + 1] = i * 3 + 1; indices[i * 3 + 2] = i * 3 + 2;
   });
   return { positions, normals, indices };
+}
+
+/** Center a mesh on its bounding box and scale it to unit half-extent,
+ * so any loaded model drops into the JET_SCALE convention regardless of
+ * its authored units. Returns the model→unit fixup matrix. */
+function fitToUnit(md: MeshData): Mat4 {
+  const pos = md.positions;
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < pos.length; i += 3) {
+    for (let k = 0; k < 3; k++) {
+      const x = pos[i + k]!;
+      if (x < min[k]!) min[k] = x;
+      if (x > max[k]!) max[k] = x;
+    }
+  }
+  const cx = (min[0]! + max[0]!) / 2, cy = (min[1]! + max[1]!) / 2, cz = (min[2]! + max[2]!) / 2;
+  const radius = Math.max(max[0]! - cx, max[1]! - cy, max[2]! - cz) || 1;
+  return multiply(scaling(1 / radius), translation(-cx, -cy, -cz));
 }
 
 const p = (x: number, y: number, z: number): V3 => v3(x, y, z);
@@ -102,6 +122,15 @@ export class Dogfight3D {
   private headings = new Map<string, number>();
   private trails = new Map<string, Trail>();
 
+  /** Real Quaternius jet model (CC0), loaded async; falls back to the
+   * procedural delta if the .glb is missing. `jetFixup` centers and
+   * unit-scales whatever model loads; `jetOrient` faces its nose +Z. */
+  private jetModel = false;
+  private jetFixup: Mat4 = identity();
+  // The converted Quaternius Spitfire already has its nose along +Z (the
+  // view's forward), Y up — no reorientation needed.
+  private jetOrient: Mat4 = identity();
+
   private hud!: HTMLElement;
   private feed!: HTMLElement;
   private banner!: HTMLElement;
@@ -125,6 +154,15 @@ export class Dogfight3D {
       ]),
     );
     this.renderer.lineMesh('df-grid', gridMesh(24_000, 2_000));
+    // Real Quaternius jet (CC0) — async; the procedural delta flies
+    // until (and if) it arrives.
+    loadGlbMesh('/models/jet.glb')
+      .then((md) => {
+        this.renderer.mesh('df-jet-model', () => md);
+        this.jetFixup = fitToUnit(md);
+        this.jetModel = true;
+      })
+      .catch((e) => console.warn('[dogfight] jet model unavailable, using procedural delta:', e));
 
     this.camera.minDist = 800;
     this.camera.maxDist = 160_000;
@@ -339,11 +377,14 @@ export class Dogfight3D {
     this.banks.set(f.id, bank);
 
     const wpos = this.world(f.pos.x, f.pos.y);
-    const model = multiply(
-      multiply(translation(wpos.x, wpos.y, wpos.z), multiply(rotationY(heading), rotationZ(bank))),
-      scaling(JET_SCALE),
-    );
-    this.renderer.draw('df-jet', model, TEAM_COLOR[f.team]);
+    const orient = multiply(translation(wpos.x, wpos.y, wpos.z), multiply(rotationY(heading), rotationZ(bank)));
+    if (this.jetModel) {
+      // world = T·Ry·Rz · size · ORIENT · fixup(model→unit).
+      const model = multiply(multiply(orient, scaling(JET_SCALE)), multiply(this.jetOrient, this.jetFixup));
+      this.renderer.draw('df-jet-model', model, TEAM_COLOR[f.team]);
+    } else {
+      this.renderer.draw('df-jet', multiply(orient, scaling(JET_SCALE)), TEAM_COLOR[f.team]);
+    }
 
     // Remaining ordnance under the wings — up to 4, two per side.
     const stations: [number, number][] = [[-0.42, -0.55], [-0.6, -0.4], [0.42, -0.55], [0.6, -0.4]];
