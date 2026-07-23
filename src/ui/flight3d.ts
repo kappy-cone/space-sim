@@ -34,8 +34,9 @@ import { planeStability } from '../physics/massmodel';
 import { SITES, Site, siteById, defaultSite } from '../physics/sites';
 import { Renderer } from '../gl/renderer';
 import { fmtDistance, fmtMass, fmtSpeed, fmtTime } from './format';
-import { WorldState, siteState } from '../world/world';
+import { WorldState, objectStateAt, siteState } from '../world/world';
 import { ascentDirection, corridorViolated, harvestCommittedFlight } from '../world/commit';
+import { LinkResult, earthFrame, hasLink } from '../world/network';
 
 /** How a flight relates to the persistent world. The world is READ
  * freely (sites, network, registry); it is WRITTEN only when a
@@ -95,6 +96,8 @@ interface Vessel {
   manualPitch: number;
   stagingEntries: StagingEntry[];
   consumedEntries: Set<number>;
+  /** Carries a relay function module — a live network node. */
+  relayAboard?: boolean;
 }
 
 interface StagingEntry {
@@ -163,6 +166,11 @@ export class Flight3D {
   private metOffset = 0;
   private rangeViolated = false;
   private harvested = false;
+  /** Comms state of the ACTIVE vessel. Manual commands are locked while
+   * unlinked; the onboard programs (autopilot, attitude hold, autoland)
+   * keep executing — RemoteTech's flight-computer behavior. */
+  private comms: LinkResult & { exempt: boolean } = { linked: true, via: null, viaName: '', exempt: true };
+  private darkNotified = false;
 
   constructor(
     private root: HTMLElement,
@@ -284,6 +292,7 @@ export class Flight3D {
       ['phase', 'Phase'],
       ...(this.compiled.released ? ([['vessel', 'Vessel']] as [string, string][]) : []),
       ['refbody', 'Ref body'],
+      ['comms', 'Comms'],
       ['alt', 'Altitude'],
       ['air', 'Airspeed'],
       ['orb', 'Orbital vel'],
@@ -394,10 +403,14 @@ export class Flight3D {
     this.launchBtn.onclick = () => this.beginFlight();
     this.apBtn = document.createElement('button');
     this.apBtn.textContent = `Autopilot: ${this.autopilotOn ? 'on' : 'off'}`;
-    this.apBtn.onclick = () => this.toggleAutopilot();
+    this.apBtn.onclick = () => {
+      if (this.commandable()) this.toggleAutopilot();
+    };
     const stageBtn = document.createElement('button');
     stageBtn.textContent = 'Stage (space)';
-    stageBtn.onclick = () => this.nextStageAction();
+    stageBtn.onclick = () => {
+      if (this.commandable()) this.nextStageAction();
+    };
     this.stageBtn = stageBtn;
     const warpDown = document.createElement('button');
     warpDown.textContent = '−';
@@ -420,20 +433,25 @@ export class Flight3D {
     thr.value = '100';
     thr.className = 'throttle-slider';
     thr.oninput = () => {
-      if (!this.autopilotOn) this.sim.throttle = Number(thr.value) / 100;
+      if (!this.autopilotOn && this.commandable()) this.sim.throttle = Number(thr.value) / 100;
     };
     this.throttleSlider = thr;
 
     const hasGear = !!this.compiled.vehicle.gear;
     const legsBtn = document.createElement('button');
     legsBtn.textContent = hasGear ? 'Gear (G)' : 'Legs (G)';
-    legsBtn.onclick = () => this.sim.deploy(hasGear ? 'gear' : 'legs');
+    legsBtn.onclick = () => {
+      if (this.commandable()) this.sim.deploy(hasGear ? 'gear' : 'legs');
+    };
     const chuteBtn = document.createElement('button');
     chuteBtn.textContent = 'Chute (P)';
-    chuteBtn.onclick = () => this.sim.deployChutes();
+    chuteBtn.onclick = () => {
+      if (this.commandable()) this.sim.deployChutes();
+    };
     const landBtn = document.createElement('button');
     landBtn.textContent = 'Auto-land: off';
     landBtn.onclick = () => {
+      if (!this.commandable()) return;
       this.autoLand = !this.autoLand;
       if (this.autoLand && this.autopilotOn) this.toggleAutopilot();
       landBtn.textContent = `Auto-land: ${this.autoLand ? 'on' : 'off'}`;
@@ -531,6 +549,7 @@ export class Flight3D {
     this.apBtn.textContent = `Autopilot: ${this.autopilotOn ? 'on' : 'off'}`;
     this.streaks.length = 0; // re-seed the motion cues around the new vessel
     this.landingPanelShown = false;
+    this.updateComms(); // link state is per-vessel
   }
 
   /**
@@ -640,6 +659,7 @@ export class Flight3D {
     });
     window.addEventListener('mousemove', (e) => {
       if (lastX === null) return;
+      if (!this.commandable()) return; // steering is a command too
       const dx = e.clientX - lastX;
       lastX = e.clientX;
       if (this.autopilotOn) this.toggleAutopilot(); // manual takeover
@@ -668,6 +688,13 @@ export class Flight3D {
   }
 
   private onKey = (e: KeyboardEvent): void => {
+    // Telemetry-side keys (warp, vessel switch) always work; COMMAND
+    // keys need a link — an unlinked vessel cannot hear you.
+    const commandKeys = [' ', 'a', 'g', 'p', 't', 'u', 'n', 'z', 'x', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'];
+    if (!this.commandable() && commandKeys.includes(e.key)) {
+      e.preventDefault();
+      return;
+    }
     if (e.key === ' ') {
       e.preventDefault();
       if (!this.running) this.beginFlight();
@@ -762,7 +789,9 @@ export class Flight3D {
     }
 
     this.pumpEvents();
-    if (++this.frameCount % 15 === 0) this.updateImpactPrediction();
+    ++this.frameCount;
+    if (this.frameCount % 15 === 0) this.updateImpactPrediction();
+    if (this.frameCount % 15 === 5 || this.frameCount === 1) this.updateComms();
     const pRatio = s.body.atmosphere ? s.body.atmosphere.pressure(Math.max(0, s.altitude)) / P0_SEA_LEVEL : 0;
     this.draw(pRatio);
     this.updateHud();
@@ -1245,6 +1274,17 @@ export class Flight3D {
       }
     });
 
+    // Comms link line: active vessel to its first network hop.
+    if (this.launch && this.running && !this.comms.exempt && this.comms.linked && this.comms.via) {
+      // The hop position is earth-frame; render in the reference-body
+      // frame (subtract the body's own earth-frame origin).
+      const origin = earthFrame(s.body.id, vec(0, 0), s.state.t);
+      const hop = this.toWorld(this.comms.via.x - origin.x, this.comms.via.y - origin.y);
+      const line = new Float32Array([0, 0, 0, hop.x - rocketW.x, hop.y - rocketW.y, hop.z - rocketW.z]);
+      this.renderer.updateLines('commlink', line, true);
+      this.renderer.draw('commlink', translation(rocketW.x, rocketW.y, rocketW.z), [0.45, 0.9, 0.6], 0.3, true);
+    }
+
     // Steering indicators: commanded attitude (cyan) and airspeed (green).
     if (this.running && !s.landed && !s.crashed) {
       const L = this.geomLength * 1.1;
@@ -1355,6 +1395,55 @@ export class Flight3D {
     }
   }
 
+  /**
+   * Recompute the active vessel's link state. Exemptions: no world
+   * context (bare test harness), an aircraft inside the atmosphere
+   * (piloted — the crew stand-in), or resting on the Earth's surface
+   * (ground infrastructure). Everything else needs line-of-sight to the
+   * one ground station or a relay chain that reaches it.
+   */
+  private updateComms(): void {
+    const s = this.sim;
+    if (!this.launch) return; // bare harness: stays linked/exempt
+    const planeInAtm =
+      !!this.compiled.vehicle.planeAero &&
+      !!s.body.atmosphere &&
+      s.altitude < s.body.atmosphere.topAltitude;
+    if (planeInAtm || (s.landed && s.body.id === 'earth')) {
+      this.comms = { linked: true, via: null, viaName: planeInAtm ? 'pilot aboard' : 'ground crew', exempt: true };
+      this.darkNotified = false;
+      return;
+    }
+    const t = s.state.t;
+    const relays: { pos: { x: number; y: number }; name: string }[] = [];
+    for (const o of this.launch.world.objects) {
+      if (o.func !== 'relay') continue;
+      relays.push({ pos: earthFrame(o.body, objectStateAt(o, t).r, t), name: o.name });
+    }
+    // Live relay-carrying vessels in this flight also serve the network
+    // (an air-launched relay is a node the moment it flies).
+    this.vessels.forEach((v, i) => {
+      if (i === this.activeIndex || v.sim.crashed) return;
+      if (!v.relayAboard) return;
+      relays.push({ pos: earthFrame(v.sim.body.id, v.sim.state.r, t), name: v.name });
+    });
+    const res = hasLink(earthFrame(s.body.id, s.state.r, t), t, relays);
+    this.comms = { ...res, exempt: false };
+    if (res.linked) {
+      this.darkNotified = false;
+    } else if (!this.darkNotified) {
+      this.darkNotified = true;
+      const div = document.createElement('div');
+      div.textContent = `T+${fmtTime(t - this.metOffset)}  ⚠ Link lost — commands locked until the network sees you (onboard programs keep running)`;
+      this.feed.prepend(div);
+    }
+  }
+
+  /** Manual commands are accepted only while linked (or exempt). */
+  private commandable(): boolean {
+    return this.comms.linked;
+  }
+
   // ---------- HUD ----------
 
   /** Nearest discovered runway on the current body within 80 km, with
@@ -1398,6 +1487,17 @@ export class Flight3D {
       this.set('vessel', this.vessels[0]?.name ?? '—');
     }
     this.set('refbody', s.body.name, s.body.id === 'earth' ? '' : 'good');
+    this.set(
+      'comms',
+      !this.launch
+        ? '—'
+        : this.comms.exempt
+          ? this.comms.viaName
+          : this.comms.linked
+            ? `via ${this.comms.viaName}`
+            : 'NO LINK — locked',
+      !this.launch || this.comms.exempt ? '' : this.comms.linked ? 'good' : 'bad',
+    );
     this.set('alt', fmtDistance(s.altitude));
     this.set('air', fmtSpeed(norm(s.airspeedVec)));
     this.set('orb', fmtSpeed(norm(s.state.v)));
