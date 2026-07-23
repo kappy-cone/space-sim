@@ -869,12 +869,12 @@ export class Sim {
     const wheelTorque = Math.max(-wheelMax, Math.min(wheelMax, residual));
     this.wheelMomentum += wheelTorque * dt;
     residual -= wheelTorque;
-    // RCS last: spends the service budget (legacy pods without a budget
-    // keep the old free-torque behavior).
+    // RCS last: spends the service budget. Torque without propellant is
+    // not a thing — a vehicle declaring rcsTorque with no budget gets
+    // nothing (the old free-torque path for budgetless vehicles is gone).
     const rcsMax = this.vehicle.rcsTorque ?? 0;
-    const rcsAvail = this.vehicle.rcsPropellant === undefined || this.rcsPropellant > 0;
-    const rcsTorqueUsed = rcsAvail ? Math.max(-rcsMax, Math.min(rcsMax, residual)) : 0;
-    if (this.vehicle.rcsPropellant !== undefined && rcsMax > 0) {
+    const rcsTorqueUsed = this.rcsPropellant > 0 ? Math.max(-rcsMax, Math.min(rcsMax, residual)) : 0;
+    if (rcsMax > 0 && rcsTorqueUsed !== 0) {
       // Duty-cycle drain: full-torque RCS ≈ a Draco couple at Isp 300.
       this.rcsPropellant = Math.max(
         0,

@@ -247,6 +247,7 @@ export const PARTS: readonly PartDef[] = [
   tank('h12', 'Hydrolox Tank 1.2 m', 'hydrolox', 0.6, 4.5, R12),
   tank('h24', 'Hydrolox Tank 2.4 m', 'hydrolox', 1.2, 9, R24),
   tank('h37', 'Hydrolox Tank 3.7 m', 'hydrolox', 1.85, 12, R37),
+  tank('m12', 'Methalox Tank 1.2 m', 'methalox', 0.6, 4, R12),
   tank('m24', 'Methalox Tank 2.4 m', 'methalox', 1.2, 8, R24),
   tank('m37', 'Methalox Tank 3.7 m', 'methalox', 1.85, 10, R37),
   tank('hyp12', 'Hypergolic Tank 1.2 m', 'hypergolic', 0.6, 1.6, R12),

@@ -242,7 +242,11 @@ describe('parachutes', () => {
       cd: 0.5,
       area: 10.75,
       geometry: geom,
+      // Explicit budget: RCS torque without propellant no longer exists
+      // (catalog capsule carries the same Draco-class budget).
       rcsTorque: 400,
+      rcsThrust: 600,
+      rcsPropellant: 40,
     };
   }
 
