@@ -100,11 +100,18 @@ radius are flagged estimates. The Air Launcher builder starter still
 carries ONE release pylon (the 4-missile loadout is a dogfight-model
 default, not wired to builder pylon count).
 
-Assets: **docs/ASSETS.md** is the scoping doc (Kenney/Quaternius CC0
-verified, formats, the tiny-deps blocker). Recommendation: stay
-procedural; when models are wanted, hand-roll a ~200-line `.glb` mesh
-loader (Option A, zero-dep) and start with a Quaternius jet. No asset
-pipeline exists yet — see [[user-asset-licensing]].
+Assets: **docs/ASSETS.md** scoping doc, and **Option A is now
+implemented** — `src/gl/glb.ts` is a zero-dep binary-glTF mesh loader
+(tested, `glb.test.ts`), and a real CC0 **Quaternius Spitfire**
+(`public/models/jet.glb`) flies the dogfight (team-tinted, async load +
+procedural fallback, auto-fit center/unit-scale in dogfight3d). The pack
+ships OBJ → converted by the build-time `scripts/obj2glb.cjs` (NOT a
+runtime dep). Provenance/CC0 in `public/models/CREDITS.md`. The loader
+outputs Uint16 indices (renderer draws UNSIGNED_SHORT) — models >65535
+verts throw; no textures/materials/skins/Draco (out of scope). Next
+asset steps if wanted: a Kenney space-kit pad/base, more ship variants,
+or Option B/C (dep/textures) — all still deferred. See
+[[user-asset-licensing]].
 
 ## Hard invariants (unchanged, plus one new)
 
