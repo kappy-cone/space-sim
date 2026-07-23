@@ -75,6 +75,21 @@ launch vehicles — that branching is the point (see docs/WORLD.md).
 Station-keeping life = residual propellant at deploy (Isp 300 s class)
 — tank sizing IS the lifetime decision; there is no timer.
 
+## Guided missile (Air Launcher weapon)
+
+The Air Launcher's release payload is a guided solid-rocket missile
+(AIM-9 Sidewinder class). Rocket, not jet — a light turbojet is stuck
+subsonic; a rocket reaches M2.5+.
+
+| Part | Wins when | Numbers |
+|---|---|---|
+| Mk 36 Missile Motor | A fast, light powered dart is wanted | 16.1 kN / ~5 s boost / Isp 235 s (solid grain 35 kg; sourced+flagged) |
+| IR Seeker + Warhead | The guided-missile nose | ~30 kg guidance + WDU-17 warhead class |
+| Missile Fin | Tail control for the 0.13 m airframe | Sidewinder-scale planform |
+
+Guidance (proportional navigation) and the dogfight are flown in the
+2-D combat model, `src/combat/` — not the orbital sim (see docs/WORLD.md).
+
 ## Suppliers (fiction over unchanged data)
 
 The non-domination table expressed as manufacturers, so the tradeoff

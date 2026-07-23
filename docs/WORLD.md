@@ -89,6 +89,31 @@ anything that couldn't fill the right column was cut.
   min-throttle floors already provide the non-dominated restart axis
   without inventing data.
 
+## Combat (added later, opt-in scope)
+
+A grounded intercept model was added on top of the world layer. It is
+deliberately fenced off from the hard-science orbital sim:
+
+- **The missile** is a real part: the Air Launcher's payload is a guided
+  solid-rocket missile (AIM-9 Sidewinder class, Mk 36 motor — sourced in
+  physics/parts.ts). One release pylon = one missile.
+- **The dogfight** (`src/combat/`) is a **separate top-down 2-D model**,
+  not the orbital Sim — the Sim's one plane is the *vertical* orbital
+  plane, which has no azimuth for a turning fight. It is the standard
+  3-DOF point-mass air-combat formulation (Shaw, *Fighter Combat*;
+  Zarchan, *Tactical and Strategic Missile Guidance*): load-factor-
+  limited aircraft, proportional-navigation missiles (a = N·Vc·λ̇, N=4)
+  using the mk36 roster numbers, beam/break evasion.
+- **What is invented** (and flagged): exactly one scalar — the missile's
+  lethal radius (12 m, WDU-17 class) — plus the aircraft combat-steering
+  AI (pursue/evade/fire), which is the one place a non-player craft runs
+  an autopilot. Everything else (thrust, burn, drag, turn rates,
+  guidance law) is sourced. Determinism holds (mulberry32 seed).
+
+Staged from **Meridian Base**, a discoverable far-side theater with two
+opposing runways (sites.ts). `simulateDogfight({seed})` returns a
+deterministic event timeline; `narrateDogfight` renders the play-by-play.
+
 ## Excluded (per the spec)
 
 No economy, crew, science, power/thermal, n-body, colonies, autopilot

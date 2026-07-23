@@ -60,6 +60,37 @@ planar mapping table, governing-rule table, flagged simplifications).
     (relay module aboard). Launch dialog: session-model choice, site
     picker with wear, corridor feasibility vs open missions.
 
+## Combat pass (this session, opt-in scope — read before touching it)
+
+Added ON TOP of the world layer, after the user chose "grounded
+intercept sim" + "faster top speed (rocket, not jet)" + "second
+base/theater". Fenced off from the hard-science orbital sim; details in
+docs/WORLD.md "Combat".
+
+- **Missile**: the Air Launcher dart is now a guided solid-rocket
+  missile. Roster engine `mk36` (physics/parts.ts), parts `msl-seeker`
+  / `msl-motor` / `msl-fin` (catalog.ts), dart rebuilt in craft.ts. One
+  release pylon = one missile. **Air Launcher golden compile was
+  regenerated** (Air-Launcher-only diff — every other starter stayed
+  byte-identical; verified before regen).
+- **`src/combat/`** is a SEPARATE 2-D top-down model — NOT the orbital
+  Sim (which is the vertical orbital plane, no azimuth). guidance.ts =
+  proportional navigation + lead intercept. dogfight.ts = point-mass
+  fighters (load-factor-limited turns), PN rocket missiles (mk36
+  numbers), beam/break AI, ONE invented scalar (12 m lethal radius,
+  flagged), mulberry32 determinism. `simulateDogfight` / `narrateDogfight`.
+- **Far theater**: `far-base` + `far-runway-a/b` in sites.ts (Meridian
+  Base, angle π), discoverable.
+
+Combat loose ends (next): no INTERACTIVE dogfight view (it's headless +
+tested; a 2-D replay canvas like the Program view would be the cheap
+add); PN guidance is NOT wired into the flight view's released darts
+(they drop ballistic there); no gun/second weapon; equal-energy 1v1
+survivors stalemate (cut at 35 s of no action, resolved on numbers); the
+combat AI is the one autopilot for non-player craft (documented
+exception to the no-scripting invariant). Aircraft turn/g and lethal
+radius are flagged estimates.
+
 ## Hard invariants (unchanged, plus one new)
 
 All of the previous list (sourced physics, g₀ only for Isp, analytic
