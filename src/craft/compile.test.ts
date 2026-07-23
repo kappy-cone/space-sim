@@ -150,4 +150,22 @@ describe('reference craft', () => {
     expect(sim.inOrbit).toBe(true);
     expect(sim.torn.size).toBe(0); // nothing ripped off on a nominal ascent
   });
+
+  it('the Heavy Lifter reaches a stable orbit under the autopilot', () => {
+    // Regression: this build once tumbled through max-Q (unstable at six
+    // fins) and then stranded its Centaur 2.4 km/s short. The ground-lit
+    // RD-180 also exercises the burn-to-depletion ascent branch.
+    const heavy = starterCrafts().find((s) => s.name === 'Heavy Lifter')!;
+    const sim = new Sim(compile(heavy.craft).vehicle);
+    const ap = new Autopilot(defaultPlan(250_000, sim.body));
+    const atmTop = sim.body.atmosphere!.topAltitude;
+    while (ap.phase !== 'done' && ap.phase !== 'failed' && sim.state.t < 8_000) {
+      ap.update(sim);
+      const coasting = !sim.burning && sim.actualThrottle < 0.01 && sim.altitude > atmTop;
+      sim.step(coasting ? Math.max(1, sim.elements.timeToApo / 20) : 0.25);
+    }
+    expect(ap.phase).toBe('done');
+    expect(sim.inOrbit).toBe(true);
+    expect(sim.torn.size).toBe(0);
+  });
 });

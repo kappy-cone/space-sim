@@ -150,59 +150,59 @@
   "warnings": []
  },
  "Heavy Lifter": {
-  "totalDeltaV": 10556.95043844009,
+  "totalDeltaV": 11164.322287289178,
   "reports": [
    {
-    "deltaV": 1934.8477817156684,
-    "deltaVSeaLevel": 1777.0850039403663,
-    "twrIgnition": 2.1446618712511816,
-    "twrBurnout": 3.948872640888727,
-    "ignitionMass": 225135.5245456825,
-    "burnoutMass": 122272.7647272495,
+    "deltaV": 1870.0406682164885,
+    "deltaVSeaLevel": 1717.5621047043692,
+    "twrIgnition": 2.09199923126366,
+    "twrBurnout": 3.773947875607801,
+    "ignitionMass": 230802.94110127533,
+    "burnoutMass": 127940.18128284231,
     "burnTime": 63.294298355555554,
     "propellantMass": 23532
    },
    {
-    "deltaV": 4645.491775661698,
-    "deltaVSeaLevel": 4281.863445437697,
-    "twrIgnition": 3.636420633914159,
-    "twrBurnout": 14.780866909677902,
-    "ignitionMass": 116528.7647272495,
-    "burnoutMass": 28668.65706105817,
+    "deltaV": 4205.2277189964625,
+    "deltaVSeaLevel": 3876.0612910885025,
+    "twrIgnition": 3.4677647046749187,
+    "twrBurnout": 12.341178238073372,
+    "ignitionMass": 122196.18128284231,
+    "burnoutMass": 34336.07361665099,
     "burnTime": 70.09946559068509,
     "propellantMass": 167190.86748462432
    },
    {
-    "deltaV": 3976.6108810627234,
+    "deltaV": 5089.053900076228,
     "deltaVSeaLevel": 0,
-    "twrIgnition": 0.8423323644349031,
-    "twrBurnout": 2.0128041727217707,
-    "ignitionMass": 13339.935894674229,
-    "burnoutMass": 5582.589650724169,
-    "burnTime": 321.6371596491816,
-    "propellantMass": 7757.346243950061
+    "twrIgnition": 0.6083948949389673,
+    "twrBurnout": 1.8549693938725325,
+    "ignitionMass": 18469.352450267048,
+    "burnoutMass": 6057.598459946948,
+    "burnTime": 514.6194554386907,
+    "propellantMass": 12411.753990320098
    },
    {
     "deltaV": 0,
     "deltaVSeaLevel": 0,
     "twrIgnition": 0,
     "twrBurnout": 0,
-    "ignitionMass": 4324.999999999992,
-    "burnoutMass": 4324.999999999992,
+    "ignitionMass": 4324.999999999996,
+    "burnoutMass": 4324.999999999996,
     "burnTime": 0,
     "propellantMass": 0
    }
   ],
   "aero": {
    "full": {
-    "cnAlpha": 6.747513855411481,
-    "yCoP": 16.485345174048938,
-    "staticMarginCal": -1.252124063352971
+    "cnAlpha": 7.8225594863978225,
+    "yCoP": 15.691327006238087,
+    "staticMarginCal": -0.908076767193084
    },
    "empty": {
-    "cnAlpha": 6.747513855411481,
-    "yCoP": 16.485345174048938,
-    "staticMarginCal": -1.0924684337915198
+    "cnAlpha": 7.8225594863978225,
+    "yCoP": 15.691327006238087,
+    "staticMarginCal": -0.7375965461227163
    }
   },
   "drag": {
@@ -233,8 +233,8 @@
   },
   "sepMass": [
    5744,
-   15328.72116638394,
-   1257.589650724176,
+   15866.72116638394,
+   1732.5984599469525,
    4325
   ],
   "strapOn": [
@@ -254,7 +254,7 @@
    },
    {
     "fluid": "hydrolox",
-    "mass": 7757.346243950061
+    "mass": 12411.753990320098
    },
    {
     "fluid": "kerolox",
@@ -263,7 +263,7 @@
   ],
   "finControlPerQ": 0,
   "warnings": [
-   "Aerodynamically unstable: CoP 1.3 calibers ahead of CoM — it will flip at max-Q unless gimbal authority holds it. Move fins aft or mass forward."
+   "Aerodynamically unstable: CoP 0.9 calibers ahead of CoM — it will flip at max-Q unless gimbal authority holds it. Move fins aft or mass forward."
   ]
  },
  "Crew Ferry": {

@@ -86,10 +86,15 @@ export function starterCrafts(): { name: string; craft: Craft }[] {
   // two GEM-40 solids on separating pylons (parallel staging: everything
   // lights on the pad, the grain thrust curves show in the flight data),
   // and a hydrolox RL10B-2 "Centaur" upper with an extendable nozzle.
+  // The Centaur carries a DCSS-class load (8 m tank): the ground-lit
+  // RD-180 burns to depletion, so the restartable upper stage does the
+  // whole insertion — a long TWR < 1 burn that needs the propellant.
+  // Eight tail fins hold the CoP near-neutral (−0.9 cal): at six it
+  // flipped at max-Q and tumbled away ~2.7 km/s in steering loss.
   const heavy = make('Heavy Lifter');
   heavy.P('root', 'capsule', null, { kind: 'below' });
   heavy.P('dec3', 'dec-24', 'root', { kind: 'below' });
-  heavy.P('centaur', 'h24', 'dec3', { kind: 'below' }, 1, 5);
+  heavy.P('centaur', 'h24', 'dec3', { kind: 'below' }, 1, 8);
   heavy.P('cengine', 'e-rl10b2', 'centaur', { kind: 'below' });
   heavy.P('dec2', 'dec-24', 'cengine', { kind: 'below' });
   heavy.P('ad1', 'adapter-37-24', 'dec2', { kind: 'below' });
@@ -97,7 +102,7 @@ export function starterCrafts(): { name: string; craft: Craft }[] {
   heavy.P('coreeng', 'e-rd180', 'coretank', { kind: 'below' });
   heavy.P('pylons', 'pylon', 'coretank', { kind: 'radial', angle: 0.2, y: 10 }, 2);
   heavy.P('srbs', 'srb-gem40', 'pylons', { kind: 'below' });
-  heavy.P('fins', 'fin-l', 'coretank', { kind: 'radial', angle: 1.1, y: 1.0 }, 6);
+  heavy.P('fins', 'fin-l', 'coretank', { kind: 'radial', angle: 1.1, y: 1.0 }, 8);
   heavy.P('drogue', 'chute-drogue', 'root', { kind: 'radial', angle: 0.9, y: 1.5 });
   heavy.P('main', 'chute-main', 'root', { kind: 'radial', angle: 2.9, y: 1.5 });
 
