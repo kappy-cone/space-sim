@@ -7,7 +7,7 @@
 // vehicle so nothing wobbles up close.
 
 import { PARTS, partById } from '../craft/catalog';
-import { Compiled } from '../craft/compile';
+import { Compiled, activeFunc } from '../craft/compile';
 import { Craft, placements } from '../craft/craft';
 import { Autopilot, defaultPlan } from '../physics/autopilot';
 import { BODIES, bodyById, bodyOrbitState } from '../physics/bodies';
@@ -34,9 +34,10 @@ import { planeStability } from '../physics/massmodel';
 import { SITES, Site, siteById, defaultSite } from '../physics/sites';
 import { Renderer } from '../gl/renderer';
 import { fmtDistance, fmtMass, fmtSpeed, fmtTime } from './format';
-import { WorldState, objectStateAt, siteState } from '../world/world';
+import { SpaceObject, WorldState, objectStateAt, siteState } from '../world/world';
 import { ascentDirection, corridorViolated, harvestCommittedFlight } from '../world/commit';
 import { LinkResult, earthFrame, hasLink } from '../world/network';
+import { Approach, CAPTURE_RANGE, CAPTURE_SPEED, closestApproach } from '../world/rendezvous';
 
 /** How a flight relates to the persistent world. The world is READ
  * freely (sites, network, registry); it is WRITTEN only when a
@@ -96,8 +97,10 @@ interface Vessel {
   manualPitch: number;
   stagingEntries: StagingEntry[];
   consumedEntries: Set<number>;
-  /** Carries a relay function module — a live network node. */
-  relayAboard?: boolean;
+  /** Registry object ids grappled by this vessel (tug flights). The
+   * registry itself is untouched until the committed harvest — a test
+   * flight grapples a simulated copy and writes nothing. */
+  captured: string[];
 }
 
 interface StagingEntry {
@@ -171,6 +174,9 @@ export class Flight3D {
    * keep executing — RemoteTech's flight-computer behavior. */
   private comms: LinkResult & { exempt: boolean } = { linked: true, via: null, viaName: '', exempt: true };
   private darkNotified = false;
+  /** Registry object targeted for rendezvous ('v' cycles). */
+  private targetId: string | null = null;
+  private approach: Approach | null = null;
 
   constructor(
     private root: HTMLElement,
@@ -250,6 +256,7 @@ export class Flight3D {
       manualPitch: this.manualPitch,
       stagingEntries: this.stagingEntries,
       consumedEntries: this.consumedEntries,
+      captured: [],
     });
     this.camera.minDist = 8;
     this.camera.maxDist = 6e7;
@@ -293,6 +300,7 @@ export class Flight3D {
       ...(this.compiled.released ? ([['vessel', 'Vessel']] as [string, string][]) : []),
       ['refbody', 'Ref body'],
       ['comms', 'Comms'],
+      ...(this.launch ? ([['tgt', 'Target'], ['tca', 'Closest appr']] as [string, string][]) : []),
       ['alt', 'Altitude'],
       ['air', 'Airspeed'],
       ['orb', 'Orbital vel'],
@@ -489,7 +497,9 @@ export class Flight3D {
         this.vessels.map((v) => ({
           sim: v.sim,
           name: v.name,
+          func: activeFunc(v.compiled, v.sim.stageIndex),
           releasedStages: v.compiled.released?.map((r) => r.sectionBurnIndex),
+          capturedIds: v.captured,
         })),
         {
           siteId: this.launch.siteId,
@@ -597,6 +607,7 @@ export class Flight3D {
       manualPitch: this.manualPitch,
       stagingEntries: buildStagingEntries(rel.sub),
       consumedEntries: new Set(),
+      captured: [],
     });
     this.switchVessel(this.vessels.length - 1);
   }
@@ -706,6 +717,7 @@ export class Flight3D {
     else if (e.key === '[') this.switchVessel(this.activeIndex - 1);
     else if (e.key === ']') this.switchVessel(this.activeIndex + 1);
     else if (e.key === 'p') this.sim.deployChutes();
+    else if (e.key === 'v') this.cycleTarget();
     else if (e.key === 't') this.sim.rcsSettle = !this.sim.rcsSettle;
     else if (e.key === 'u') this.sim.fireUllageMotor();
     else if (e.key === 'n') this.sim.deployNozzle();
@@ -792,6 +804,7 @@ export class Flight3D {
     ++this.frameCount;
     if (this.frameCount % 15 === 0) this.updateImpactPrediction();
     if (this.frameCount % 15 === 5 || this.frameCount === 1) this.updateComms();
+    if (this.frameCount % 15 === 10) this.updateApproach();
     const pRatio = s.body.atmosphere ? s.body.atmosphere.pressure(Math.max(0, s.altitude)) / P0_SEA_LEVEL : 0;
     this.draw(pRatio);
     this.updateHud();
@@ -1285,6 +1298,22 @@ export class Flight3D {
       this.renderer.draw('commlink', translation(rocketW.x, rocketW.y, rocketW.z), [0.45, 0.9, 0.6], 0.3, true);
     }
 
+    // Rendezvous target marker (magenta), at the registry object's
+    // analytically propagated position.
+    const tObj = this.currentTarget();
+    if (tObj && this.running) {
+      const tp = objectStateAt(tObj, s.state.t).r;
+      const wpt = this.toWorld(tp.x, tp.y);
+      const sc = Math.max(30, this.camera.dist * 0.01);
+      this.renderer.draw(
+        'canopy',
+        multiply(translation(wpt.x, wpt.y, wpt.z), scaling(sc)),
+        [0.95, 0.4, 0.85],
+        0.85,
+        true,
+      );
+    }
+
     // Steering indicators: commanded attitude (cyan) and airspeed (green).
     if (this.running && !s.landed && !s.crashed) {
       const L = this.geomLength * 1.1;
@@ -1424,7 +1453,7 @@ export class Flight3D {
     // (an air-launched relay is a node the moment it flies).
     this.vessels.forEach((v, i) => {
       if (i === this.activeIndex || v.sim.crashed) return;
-      if (!v.relayAboard) return;
+      if (activeFunc(v.compiled, v.sim.stageIndex) !== 'relay') return;
       relays.push({ pos: earthFrame(v.sim.body.id, v.sim.state.r, t), name: v.name });
     });
     const res = hasLink(earthFrame(s.body.id, s.state.r, t), t, relays);
@@ -1442,6 +1471,70 @@ export class Flight3D {
   /** Manual commands are accepted only while linked (or exempt). */
   private commandable(): boolean {
     return this.comms.linked;
+  }
+
+  // ---------- rendezvous targeting (tug flights) ----------
+
+  /** Registry objects targetable from the active vessel: same reference
+   * body, not already grappled this flight. */
+  private targetables(): SpaceObject[] {
+    if (!this.launch) return [];
+    const grabbed = new Set(this.vessels.flatMap((v) => v.captured));
+    return this.launch.world.objects.filter(
+      (o) => o.body === this.sim.body.id && !grabbed.has(o.id),
+    );
+  }
+
+  /** Cycle the rendezvous target ('v') — telemetry, allowed while dark. */
+  private cycleTarget(): void {
+    const list = this.targetables();
+    if (list.length === 0) {
+      this.targetId = null;
+      return;
+    }
+    const i = list.findIndex((o) => o.id === this.targetId);
+    this.targetId = list[(i + 1) % list.length]!.id;
+    this.approach = null;
+  }
+
+  private currentTarget(): SpaceObject | null {
+    if (!this.targetId || !this.launch) return null;
+    return this.targetables().find((o) => o.id === this.targetId) ?? null;
+  }
+
+  /** Closest-approach prediction + grapple adjudication, every ~15th
+   * frame. Capture is the flagged proximity-ops abstraction: within
+   * 250 m under 5 m/s relative, the grapple takes hold — target mass
+   * joins the vessel (point-mass: attitude inertia unchanged). The
+   * registry is NOT touched here; a committed harvest settles it. */
+  private updateApproach(): void {
+    const obj = this.currentTarget();
+    const s = this.sim;
+    if (!obj || s.landed || s.crashed || !this.running) {
+      this.approach = null;
+      return;
+    }
+    const elSelf = s.elements;
+    const elObj = { period: 2 * Math.PI * Math.sqrt(Math.abs(elSelf.a) ** 3 / s.body.mu) };
+    const horizon = Math.min(
+      86_400,
+      Math.max(600, 2 * Math.max(isFinite(elSelf.period) ? elSelf.period : 0, elObj.period)),
+    );
+    this.approach = closestApproach(s.state.r, s.state.v, obj, s.state.t, horizon);
+    // Grapple check at the CURRENT separation.
+    if (activeFunc(this.compiled, s.stageIndex) !== 'tug') return;
+    const now = objectStateAt(obj, s.state.t);
+    const dist = norm(sub(s.state.r, now.r));
+    const rel = norm(sub(s.state.v, now.v));
+    if (dist < CAPTURE_RANGE && rel < CAPTURE_SPEED) {
+      this.vessels[this.activeIndex]!.captured.push(obj.id);
+      s.state.m += obj.mass;
+      this.targetId = null;
+      this.approach = null;
+      const div = document.createElement('div');
+      div.textContent = `T+${fmtTime(s.state.t - this.metOffset)}  Grappled ${obj.name} (+${fmtMass(obj.mass)})`;
+      this.feed.prepend(div);
+    }
   }
 
   // ---------- HUD ----------
@@ -1498,6 +1591,26 @@ export class Flight3D {
             : 'NO LINK — locked',
       !this.launch || this.comms.exempt ? '' : this.comms.linked ? 'good' : 'bad',
     );
+    if (this.launch) {
+      const tobj = this.currentTarget();
+      if (tobj) {
+        const now = objectStateAt(tobj, s.state.t);
+        const d = norm(sub(s.state.r, now.r));
+        this.set('tgt', `${tobj.name} · ${fmtDistance(d)}`);
+        if (this.approach) {
+          this.set(
+            'tca',
+            `${fmtDistance(this.approach.dist)} in ${fmtTime(this.approach.dt)} · ${this.approach.relSpeed.toFixed(1)} m/s`,
+            this.approach.dist < 5_000 ? 'good' : '',
+          );
+        } else {
+          this.set('tca', '…');
+        }
+      } else {
+        this.set('tgt', this.targetables().length > 0 ? '— (V cycles)' : 'nothing in reach');
+        this.set('tca', '—');
+      }
+    }
     this.set('alt', fmtDistance(s.altitude));
     this.set('air', fmtSpeed(norm(s.airspeedVec)));
     this.set('orb', fmtSpeed(norm(s.state.v)));

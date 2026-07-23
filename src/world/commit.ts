@@ -78,6 +78,10 @@ export interface HarvestVessel {
    * pylons): their sepStates are skipped — the payload is harvested as
    * its own vessel, not as debris. */
   releasedStages?: number[];
+  /** Registry ids this vessel grappled in flight (tug). At commit they
+   * leave the registry — deorbited with the tug or riding attached (the
+   * mass is already inside the vessel's final state). */
+  capturedIds?: string[];
 }
 
 export interface HarvestResult {
@@ -97,8 +101,22 @@ export function harvestCommittedFlight(
   let tEnd = launchEpoch;
   for (const v of vessels) tEnd = Math.max(tEnd, v.sim.state.t);
 
-  // Age the pre-existing registry through the flight window first.
-  const events: WorldEvent[] = advanceWorld(w, tEnd - launchEpoch);
+  // Grappled objects leave the registry first (they were physically
+  // grabbed mid-flight — their mass rides inside the tug's final state).
+  const grabbed = new Set(vessels.flatMap((v) => v.capturedIds ?? []));
+  const events: WorldEvent[] = [];
+  if (grabbed.size > 0) {
+    w.objects = w.objects.filter((o) => {
+      if (!grabbed.has(o.id)) return true;
+      const ev: WorldEvent = { type: 'deorbited', t: launchEpoch, id: o.id, name: o.name };
+      events.push(ev);
+      pushLog(w, ev);
+      return false;
+    });
+  }
+
+  // Age the pre-existing registry through the flight window.
+  events.push(...advanceWorld(w, tEnd - launchEpoch));
 
   const n = ++w.launches;
   const launchEv: WorldEvent = { type: 'launch', t: launchEpoch, n, site: opts.siteId, name: opts.launchName };

@@ -121,6 +121,11 @@ export interface PartDef {
   release?: boolean;
   /** Dedicated ullage motor: fired to settle propellant, not propulsion. */
   ullage?: boolean;
+  /** Satellite function module: what the stack DOES once it is on orbit
+   * in the world registry. Exactly three functions exist (relay /
+   * survey / tug), each demanding a different orbit regime — that
+   * branching is what makes satellites change rocket design. */
+  satFunc?: 'relay' | 'survey' | 'tug';
   deploy?: DeployDef;
   control?: ControlDef;
   stackTop: boolean; // something can sit on top of me
@@ -281,6 +286,66 @@ export const PARTS: readonly PartDef[] = [
     radialChild: false,
     rcsTorque: 800,
     control: { rcsThrust: 400, rcsPropellant: 30 },
+  }),
+
+  // ---- satellite function modules ----
+  // Satellites are DESIGNED PAYLOADS, not a vehicle class: one of these
+  // modules plus the existing tanks/engines/RCS/wheels is a satellite.
+  // Exactly three functions, each the right answer under a different
+  // design condition (the roster rule applied to the world):
+  //   relay  — wants HIGH orbit for footprint (synchronous altitude
+  //            hovers over one longitude — expensive to reach);
+  //   survey — wants LOW orbit for imaging resolution, in the world's
+  //            retrograde (SSO-analogue) demand direction;
+  //   tug    — wants WHATEVER orbit the target junk is in, plus the
+  //            restarts and propellant to move it.
+  def({
+    id: 'sat-relay',
+    name: 'Relay Module',
+    kind: 'payload',
+    segments: [cyl(0.6, 1.0)],
+    color: [0.55, 0.75, 0.95],
+    dryMass: 150,
+    source:
+      'Bent-pipe transponder + antenna package; payload-fraction class of an Iridium-generation relay bus (689 kg total sat) — module mass ESTIMATE',
+    noseCd: 0.65,
+    satFunc: 'relay',
+    stackTop: true,
+    stackBottom: true,
+    radialParent: true,
+    radialChild: true,
+  }),
+  def({
+    id: 'sat-survey',
+    name: 'Survey Module',
+    kind: 'payload',
+    segments: [cyl(0.6, 1.4)],
+    color: [0.6, 0.9, 0.7],
+    dryMass: 250,
+    source:
+      'Pushbroom imaging telescope; SPOT HRV instrument class ~250 kg (CNES). Useful imaging ceiling 900 km — Landsat 705 km / SPOT 822 km operating altitudes',
+    noseCd: 0.65,
+    satFunc: 'survey',
+    stackTop: true,
+    stackBottom: true,
+    radialParent: true,
+    radialChild: true,
+  }),
+  def({
+    id: 'sat-tug',
+    name: 'Tug Grapple Module',
+    kind: 'payload',
+    segments: [fru(0.7, 0.5, 1.0)],
+    color: [0.9, 0.7, 0.45],
+    dryMass: 300,
+    source:
+      'Rendezvous sensors + capture mechanism; MEV-class servicing hardware (MEV-1 docked Intelsat 901, 2020) — module mass ESTIMATE. Capture: within 250 m under 5 m/s relative (proximity-ops abstraction, flagged)',
+    noseCd: 0.5,
+    satFunc: 'tug',
+    stackTop: true,
+    stackBottom: true,
+    radialParent: true,
+    radialChild: true,
   }),
   // ---- tanks: fluid × diameter, length parametric ----
   tank('t12-m', 'Kerolox Tank 1.2 m', 'kerolox', 0.6, 3.6, R12),

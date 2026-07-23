@@ -23,6 +23,9 @@ import {
 } from './commit';
 import { starterCrafts } from '../craft/craft';
 import { siteById } from '../physics/sites';
+import { activeFunc } from '../craft/compile';
+import { addPart } from '../craft/craft';
+import { closestApproach } from './rendezvous';
 import { activateSite, siteAvailable, siteState } from './world';
 import {
   SpaceObject,
@@ -230,6 +233,89 @@ describe('terrain reveal bitfield', () => {
     const back = deserializeWorld(serializeWorld(w))!;
     expect(isRevealed(back, 0.05)).toBe(true);
     expect(revealedFraction(back)).toBeCloseTo(revealedFraction(w), 12);
+  });
+});
+
+describe('satellites', () => {
+  it('a function module classifies the compiled craft and survives staging bookkeeping', () => {
+    const craft = referenceCraft();
+    addPart(craft, 'root', 'sat-relay', { kind: 'radial', angle: 0.4, y: 1.0 });
+    const c = compile(craft);
+    expect(c.funcModules.length).toBe(1);
+    // The module rides the top section (last burn index): active from
+    // stage 0 through the final stack.
+    expect(activeFunc(c, 0)).toBe('relay');
+    expect(activeFunc(c, c.stages.length - 1)).toBe('relay');
+  });
+
+  it('a deployed relay is harvested as a satellite with its function', () => {
+    const craft = referenceCraft();
+    addPart(craft, 'root', 'sat-relay', { kind: 'radial', angle: 0.4, y: 1.0 });
+    const compiled = compile(craft);
+    const sim = new Sim(compiled.vehicle);
+    // Plant it directly in a stable orbit (the ascent is tested elsewhere).
+    const r = EARTH.radius + 500_000;
+    sim.landed = false;
+    sim.stageIndex = compiled.stages.length - 1;
+    sim.state = { ...sim.state, r: vec(r, 0), v: vec(0, Math.sqrt(EARTH.mu / r)) };
+    const w = emptyWorld();
+    harvestCommittedFlight(w, [{ sim, name: 'Relay 1', func: activeFunc(compiled, sim.stageIndex) }], {
+      siteId: 'pad-1',
+      launchName: 'Relay 1',
+    });
+    const sat = w.objects.find((o) => o.kind === 'satellite');
+    expect(sat).toBeDefined();
+    expect(sat!.func).toBe('relay');
+    expect(sat!.skProp).toBeGreaterThan(0); // residual RCS budget = station-keeping life
+  });
+
+  it('closestApproach finds a designed perigee intercept', () => {
+    // Target: circular at r1. Vessel: ellipse with perigee r1, apogee
+    // r2, at apoapsis now; the target is phased to arrive at the
+    // vessel's perigee point exactly half a vessel-period from now.
+    const r1 = EARTH.radius + 400_000;
+    const r2 = EARTH.radius + 1_200_000;
+    const a = (r1 + r2) / 2;
+    const Tv = 2 * Math.PI * Math.sqrt((a * a * a) / EARTH.mu);
+    const nT = Math.sqrt(EARTH.mu / (r1 * r1 * r1)); // target mean motion
+    // Vessel at apoapsis on +x; perigee at angle π. Target must be at
+    // angle π − nT·(Tv/2) now.
+    const phi0 = Math.PI - nT * (Tv / 2);
+    const target: SpaceObject = {
+      id: 'D-1',
+      name: 'debris',
+      kind: 'debris',
+      body: 'earth',
+      r: [r1 * Math.cos(phi0), r1 * Math.sin(phi0)],
+      v: [-Math.sqrt(EARTH.mu / r1) * Math.sin(phi0), Math.sqrt(EARTH.mu / r1) * Math.cos(phi0)],
+      t0: 0,
+      mass: 2_000,
+      skProp: 0,
+      cdA: 5,
+      launch: 0,
+    };
+    const vApo = Math.sqrt(EARTH.mu * (2 / r2 - 1 / a));
+    const res = closestApproach(vec(r2, 0), vec(0, vApo), target, 0, 2 * Tv);
+    expect(res.dist).toBeLessThan(1_000); // metres-class miss at the designed node
+    expect(Math.abs(res.dt - Tv / 2)).toBeLessThan(30);
+    expect(res.relSpeed).toBeGreaterThan(100); // real intercepts arrive hot — braking is the tug's job
+  });
+
+  it('grappled objects leave the registry at commit', () => {
+    const compiled = compile(referenceCraft());
+    const sim = new Sim(compiled.vehicle);
+    const r = EARTH.radius + 500_000;
+    sim.landed = false;
+    sim.state = { ...sim.state, r: vec(r, 0), v: vec(0, Math.sqrt(EARTH.mu / r)) };
+    const w = emptyWorld();
+    w.objects.push(circObject(400_000, 0.004));
+    const res = harvestCommittedFlight(
+      w,
+      [{ sim, name: 'Tug 1', capturedIds: ['T-1'] }],
+      { siteId: 'pad-1', launchName: 'Tug 1' },
+    );
+    expect(w.objects.find((o) => o.id === 'T-1')).toBeUndefined();
+    expect(res.events.some((e) => e.type === 'deorbited')).toBe(true);
   });
 });
 

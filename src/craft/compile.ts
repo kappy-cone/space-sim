@@ -88,6 +88,20 @@ export interface Compiled {
   /** Air-launch payloads: pre-compiled released subtrees, ready to spawn
    * as their own vessels at the release staging event. */
   released?: { pylonId: string; sectionBurnIndex: number; sub: Compiled; subCraft: Craft; name: string }[];
+  /** Satellite function modules aboard, with the burn index they belong
+   * to — a module is ACTIVE while its stage is still attached. The
+   * harvest classifies whatever remains on orbit by its surviving
+   * module (highest stage wins when several survive). */
+  funcModules: { func: 'relay' | 'survey' | 'tug'; stage: number }[];
+}
+
+/** Function still active on a vehicle whose stages < stageIndex are gone. */
+export function activeFunc(c: Compiled, stageIndex: number): 'relay' | 'survey' | 'tug' | undefined {
+  let best: { func: 'relay' | 'survey' | 'tug'; stage: number } | undefined;
+  for (const m of c.funcModules) {
+    if (m.stage >= stageIndex && (!best || m.stage > best.stage)) best = m;
+  }
+  return best?.func;
 }
 
 /** Commonly cited Δv to LEO: ~7.8 km/s orbital + 1.5–2.0 km/s losses
@@ -691,6 +705,18 @@ export function compile(craft: Craft): Compiled {
     gear,
   };
 
+  // Satellite function modules aboard (relay/survey/tug), by burn index.
+  const funcModules: Compiled['funcModules'] = [];
+  for (const p of Object.values(craft.parts)) {
+    const d = partById(p.defId);
+    if (d.satFunc) funcModules.push({ func: d.satFunc, stage: burnIndexOf(p.id) });
+  }
+  if (new Set(funcModules.map((m) => m.func)).size > 1) {
+    warnings.push(
+      'Multiple function modules aboard — the registry records ONE function per satellite; the last-staged module wins.',
+    );
+  }
+
   const reports = vehicle.stages.map((_s, i) => stageReport(vehicle, i));
   // Crossfeed/parallel honesty: overwrite the serial per-stage estimate
   // with the closed-form phase walk (identical for serial vehicles). The
@@ -811,6 +837,7 @@ export function compile(craft: Craft): Compiled {
     fairings,
     aero,
     released: released.length > 0 ? released : undefined,
+    funcModules,
   };
 }
 
