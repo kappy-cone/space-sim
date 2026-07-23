@@ -26,7 +26,7 @@ import { siteById } from '../physics/sites';
 import { activeFunc } from '../craft/compile';
 import { addPart } from '../craft/craft';
 import { closestApproach } from './rendezvous';
-import { activateSite, binOf, siteAvailable, siteState } from './world';
+import { activateSite, binOf, congestion, siteAvailable, siteState } from './world';
 import {
   SpaceObject,
   WorldState,
@@ -316,6 +316,27 @@ describe('satellites', () => {
     );
     expect(w.objects.find((o) => o.id === 'T-1')).toBeUndefined();
     expect(res.events.some((e) => e.type === 'deorbited')).toBe(true);
+  });
+});
+
+describe('congestion indicator', () => {
+  it('counts band occupancy from periapsis to apoapsis', () => {
+    const w = emptyWorld();
+    w.objects.push(circObject(450_000, 0.004)); // occupies the 400–500 km band
+    // An eccentric object 200×850 km crosses bands 2..8.
+    const rp = EARTH.radius + 200_000;
+    const ra = EARTH.radius + 850_000;
+    const a = (rp + ra) / 2;
+    const vp = Math.sqrt(EARTH.mu * (2 / rp - 1 / a));
+    w.objects.push({
+      id: 'E-1', name: 'ecc', kind: 'debris', body: 'earth',
+      r: [rp, 0], v: [0, vp], t0: 0, mass: 500, skProp: 0, cdA: 3, launch: 0,
+    });
+    const bands = congestion(w);
+    expect(bands[4]).toBe(2); // 400–500 km: both
+    expect(bands[2]).toBe(1); // 200–300: only the eccentric one
+    expect(bands[8]).toBe(1); // 800–900: its apoapsis reach
+    expect(bands[12]).toBe(0);
   });
 });
 

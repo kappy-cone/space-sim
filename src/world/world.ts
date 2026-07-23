@@ -362,6 +362,31 @@ export function checkSiteDiscoveries(w: WorldState, t: number): WorldEvent[] {
   return out;
 }
 
+// ---------- congestion ----------
+
+/** Altitude-band occupancy for the congestion indicator: an object
+ * occupies every band its orbit crosses between periapsis and apoapsis
+ * (that is what a conjunction risk cares about, not just where the
+ * object is right now). 100 km bands. */
+export function congestion(
+  w: WorldState,
+  bodyId = 'earth',
+  bandMeters = 100_000,
+  maxBands = 20,
+): number[] {
+  const counts = new Array<number>(maxBands).fill(0);
+  const R = bodyById(bodyId).radius;
+  for (const o of w.objects) {
+    if (o.body !== bodyId) continue;
+    const el = objectElements(o);
+    if (el.e >= 1) continue;
+    const lo = Math.max(0, Math.floor((el.rPeri - R) / bandMeters));
+    const hi = Math.min(maxBands - 1, Math.floor((el.rApo - R) / bandMeters));
+    for (let b = lo; b <= hi && b < maxBands; b++) counts[b]!++;
+  }
+  return counts;
+}
+
 // ---------- sites ----------
 
 /** Site status — a pure read: unmutated worlds report the static

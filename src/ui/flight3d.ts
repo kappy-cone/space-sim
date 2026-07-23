@@ -1315,6 +1315,33 @@ export class Flight3D {
       this.renderer.draw('commlink', translation(rocketW.x, rocketW.y, rocketW.z), [0.45, 0.9, 0.6], 0.3, true);
     }
 
+    // The registry, live in the sky: every object in the current
+    // reference frame drawn at its analytically propagated position —
+    // debris grey, relays cyan, survey green, tugs amber, vessels
+    // white. Over many committed launches the low bands visibly crowd;
+    // that self-inflicted litter is the tug market.
+    if (this.launch && this.running) {
+      for (const o of this.launch.world.objects) {
+        if (o.body !== s.body.id) continue;
+        if (o.id === this.targetId) continue; // the marker draws it bigger
+        if (this.vessels.some((v) => v.captured.includes(o.id))) continue; // riding along
+        const p = objectStateAt(o, s.state.t).r;
+        const wpt = this.toWorld(p.x, p.y);
+        const sc = Math.max(12, this.camera.dist * 0.004);
+        const color: [number, number, number] =
+          o.kind === 'debris'
+            ? [0.55, 0.55, 0.58]
+            : o.func === 'relay'
+              ? [0.45, 0.75, 0.95]
+              : o.func === 'survey'
+                ? [0.5, 0.9, 0.6]
+                : o.func === 'tug'
+                  ? [0.95, 0.7, 0.4]
+                  : [0.9, 0.9, 0.92];
+        this.renderer.draw('canopy', multiply(translation(wpt.x, wpt.y, wpt.z), scaling(sc)), color, 0.7, true);
+      }
+    }
+
     // Rendezvous target marker (magenta), at the registry object's
     // analytically propagated position.
     const tObj = this.currentTarget();
