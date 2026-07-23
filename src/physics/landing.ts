@@ -60,12 +60,21 @@ export class LandingAutopilot {
       case 'fall': {
         sim.throttle = 0;
         const hBurn = sim.suicideBurnAltitude;
+        // Ullage: settle with RCS on the final approach to the burn
+        // trigger so a pump-fed engine can light. Arm by TIME to the
+        // trigger (12 s covers the 3 s settle with margin) — a distance
+        // ratio drains the whole service budget on orbital-class
+        // descents where the burn altitude is hundreds of km.
+        const tToBurn = isFinite(hBurn) ? (radar - hBurn * 1.05) / Math.max(sim.vSpeed, 1) : Infinity;
+        sim.rcsSettle = tToBurn < 12;
         // 5% margin: burning a touch early costs little; late is fatal.
         if (isFinite(hBurn) && radar <= hBurn * 1.05) this.phase = 'burn';
         break;
       }
+
       case 'burn': {
         sim.throttle = 1;
+        sim.rcsSettle = sim.actualThrottle < 0.3; // hold settle through the light
         // Exit on the TOTAL surface-relative speed: on shallow arrivals
         // the vertical component dies in seconds while the horizontal
         // still carries km/s — the braking burn isn't done until all of
@@ -89,6 +98,10 @@ export class LandingAutopilot {
         break;
       }
       case 'final': {
+        // Keep the tanks settled through the profile's shutdown pulses —
+        // low-gravity freefall unsettles them in tens of seconds and the
+        // relight would flame out (found by the orbital-arrival test).
+        sim.rcsSettle = sim.actualThrottle < 0.3;
         // Hold a gentle descent: thrust ≈ m·(g + k·(v − v_target)).
         const rn = Math.hypot(sim.state.r.x, sim.state.r.y);
         const g = sim.body.mu / (rn * rn);

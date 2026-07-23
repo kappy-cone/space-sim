@@ -21,6 +21,10 @@ export interface CraftPart {
   parentId: string | null;
   attach: Attach;
   symmetry: number; // radial copies, or engine cluster count
+  /** Parametric length [m] for tanks (clamped to def.lengthRange).
+   * Length is a build-time parameter — the discrete axes are
+   * fluid × diameter; two tanks differing only in length are not parts. */
+  length?: number;
 }
 
 export interface Craft {
@@ -65,77 +69,105 @@ export function referenceCraft(): Craft {
 }
 
 /** Starter builds: sound propulsion and positive static margin, pinned by
- * the compile test suite. */
+ * the compile test suite. Deliberately diverse across the roster: every
+ * propellant type, solids on pylons (parallel staging), a hypergolic
+ * service module, an extendable-nozzle hydrolox upper, fairings and
+ * adapters — each starter demonstrates a decision axis. */
 export function starterCrafts(): { name: string; craft: Craft }[] {
-  // Heavy lifter: reference core + 3 symmetric boosters with nose cones.
-  const heavy = referenceCraft();
-  heavy.name = 'Heavy Lifter';
-  const B = (id: string, defId: string, parentId: string, attach: Attach, symmetry = 1): void => {
-    heavy.parts[id] = { id, defId, parentId, attach, symmetry };
-  };
-  B('rb', 't24-m', 's1tank', { kind: 'radial', angle: 0.4, y: 4 }, 3);
-  B('rbe', 'e-merlin-1d', 'rb', { kind: 'below' });
-  B('rbn', 'nose-24', 'rb', { kind: 'above' });
-
-  // Recovery capsule: reference stack + drogue & main chutes on the pod —
-  // orbit up, deorbit, and splash down inside the chute touchdown limits.
-  const recovery = referenceCraft();
-  recovery.name = 'Recovery Capsule';
-  recovery.parts['drogue'] = {
-    id: 'drogue',
-    defId: 'chute-drogue',
-    parentId: 'root',
-    attach: { kind: 'radial', angle: 0.9, y: 1.5 },
-    symmetry: 1,
-  };
-  recovery.parts['main'] = {
-    id: 'main',
-    defId: 'chute-main',
-    parentId: 'root',
-    attach: { kind: 'radial', angle: 2.9, y: 1.5 },
-    symmetry: 1,
+  const make = (name: string): { craft: Craft; P: (id: string, defId: string, parentId: string | null, attach: Attach, symmetry?: number, length?: number) => void } => {
+    const craft: Craft = { name, rootId: 'root', stageOrder: [], parts: {} };
+    const P = (id: string, defId: string, parentId: string | null, attach: Attach, symmetry = 1, length?: number): void => {
+      craft.parts[id] = { id, defId, parentId, attach, symmetry, ...(length !== undefined ? { length } : {}) };
+    };
+    return { craft, P };
   };
 
-  // Powered lander demo: probe + tank + Rutherford pair + legs + drogue.
-  const lander: Craft = {
-    name: 'Test Lander',
-    rootId: 'root',
-    stageOrder: [],
-    parts: {},
-  };
-  const L = (id: string, defId: string, parentId: string | null, attach: Attach, symmetry = 1): void => {
-    lander.parts[id] = { id, defId, parentId, attach, symmetry };
-  };
-  L('root', 'probe', null, { kind: 'below' });
-  L('tank', 't12-s', 'root', { kind: 'below' });
-  L('eng', 'e-rutherford', 'tank', { kind: 'below' }, 2);
-  L('legs', 'leg-s', 'tank', { kind: 'radial', angle: 0.3, y: 0.8 }, 4);
-  L('fins', 'fin-m', 'tank', { kind: 'radial', angle: 1.1, y: 0.8 }, 8);
+  // Heavy Lifter — Atlas-V-shaped: single-stick RD-180 kerolox core,
+  // two GEM-40 solids on separating pylons (parallel staging: everything
+  // lights on the pad, the grain thrust curves show in the flight data),
+  // and a hydrolox RL10B-2 "Centaur" upper with an extendable nozzle.
+  const heavy = make('Heavy Lifter');
+  heavy.P('root', 'capsule', null, { kind: 'below' });
+  heavy.P('dec3', 'dec-24', 'root', { kind: 'below' });
+  heavy.P('centaur', 'h24', 'dec3', { kind: 'below' }, 1, 5);
+  heavy.P('cengine', 'e-rl10b2', 'centaur', { kind: 'below' });
+  heavy.P('dec2', 'dec-24', 'cengine', { kind: 'below' });
+  heavy.P('ad1', 'adapter-37-24', 'dec2', { kind: 'below' });
+  heavy.P('coretank', 't37-m', 'ad1', { kind: 'below' }, 1, 16);
+  heavy.P('coreeng', 'e-rd180', 'coretank', { kind: 'below' });
+  heavy.P('pylons', 'pylon', 'coretank', { kind: 'radial', angle: 0.2, y: 10 }, 2);
+  heavy.P('srbs', 'srb-gem40', 'pylons', { kind: 'below' });
+  heavy.P('fins', 'fin-l', 'coretank', { kind: 'radial', angle: 1.1, y: 1.0 }, 6);
+  heavy.P('drogue', 'chute-drogue', 'root', { kind: 'radial', angle: 0.9, y: 1.5 });
+  heavy.P('main', 'chute-main', 'root', { kind: 'radial', angle: 2.9, y: 1.5 });
 
-  // Escape Probe: a third RL10 stage on the reference lower stack —
-  // enough Δv to leave Earth orbit entirely (escape needs ~12.6 km/s
-  // ideal from the surface: ~9.4 to LEO + ~3.2 more to C3 = 0).
-  const escape: Craft = { name: 'Escape Probe', rootId: 'root', stageOrder: [], parts: {} };
-  const E = (id: string, defId: string, parentId: string | null, attach: Attach, symmetry = 1): void => {
-    escape.parts[id] = { id, defId, parentId, attach, symmetry };
-  };
-  E('root', 'probe', null, { kind: 'below' });
-  E('s3tank', 't24-s', 'root', { kind: 'below' });
-  E('s3eng', 'e-rl10b2', 's3tank', { kind: 'below' });
-  E('dec3', 'dec-24', 's3eng', { kind: 'below' });
-  E('s2tank', 't37-m', 'dec3', { kind: 'below' });
-  E('s2eng', 'e-merlin-vac', 's2tank', { kind: 'below' });
-  E('dec2', 'dec-37', 's2eng', { kind: 'below' });
-  E('s1tank', 't37-xl', 'dec2', { kind: 'below' });
-  E('s1eng', 'e-merlin-1d', 's1tank', { kind: 'below' }, 9);
-  E('fins', 'fin-l', 's1tank', { kind: 'radial', angle: Math.PI / 8, y: 1.3 }, 8);
+  // Crew Ferry — Shuttle-style insertion: the kerolox lower stack flies a
+  // deliberately suborbital profile and the capsule's hypergolic OMS
+  // (pressure-fed, ullage-immune, restarts forever) finishes the orbit
+  // and does the deorbit burn. Chutes bring it home.
+  const ferry = make('Crew Ferry');
+  ferry.P('root', 'capsule', null, { kind: 'below' });
+  ferry.P('om-tank', 'hyp24', 'root', { kind: 'below' }, 1, 1.8);
+  ferry.P('om-eng', 'e-aj10', 'om-tank', { kind: 'below' }, 2);
+  ferry.P('dec3', 'dec-24', 'om-eng', { kind: 'below' });
+  ferry.P('ad2', 'adapter-37-24', 'dec3', { kind: 'below' });
+  ferry.P('s2tank', 't37-m', 'ad2', { kind: 'below' }, 1, 8);
+  ferry.P('s2eng', 'e-merlin-vac', 's2tank', { kind: 'below' });
+  ferry.P('dec2', 'dec-37', 's2eng', { kind: 'below' });
+  ferry.P('s1tank', 't37-xl', 'dec2', { kind: 'below' }, 1, 24);
+  ferry.P('s1eng', 'e-merlin-1d', 's1tank', { kind: 'below' }, 9);
+  ferry.P('fins', 'fin-l', 's1tank', { kind: 'radial', angle: Math.PI / 8, y: 1.3 }, 8);
+  ferry.P('drogue', 'chute-drogue', 'root', { kind: 'radial', angle: 0.9, y: 1.5 });
+  ferry.P('main', 'chute-main', 'root', { kind: 'radial', angle: 2.9, y: 1.5 });
+
+  // Moon Freighter — mixed staging the Saturn way: kerolox below,
+  // hydrogen above. The RL10B-2 upper stage carries the extendable
+  // nozzle, ullage motors for its restart, and hydrolox boiloff makes
+  // the mission clock real. Probe + fairing on top.
+  const freighter = make('Moon Freighter');
+  freighter.P('root', 'probe', null, { kind: 'below' });
+  freighter.P('rcs', 'rcs-quad', 'root', { kind: 'radial', angle: 0.5, y: 0.45 }, 2);
+  freighter.P('ad3', 'adapter-24-12', 'root', { kind: 'below' });
+  freighter.P('s3tank', 'h24', 'ad3', { kind: 'below' }, 1, 7);
+  freighter.P('ull', 'ullage-motor', 's3tank', { kind: 'radial', angle: 0.3, y: 1.0 }, 2);
+  freighter.P('fair', 'fairing-24', 's3tank', { kind: 'radial', angle: 0, y: 6.99 });
+  freighter.P('s3eng', 'e-rl10b2', 's3tank', { kind: 'below' });
+  freighter.P('dec2', 'dec-24', 's3eng', { kind: 'below' });
+  freighter.P('ad1', 'adapter-37-24', 'dec2', { kind: 'below' });
+  freighter.P('s2tank', 't37-m', 'ad1', { kind: 'below' }, 1, 9);
+  freighter.P('s2eng', 'e-merlin-vac', 's2tank', { kind: 'below' });
+  freighter.P('dec1', 'dec-37', 's2eng', { kind: 'below' });
+  freighter.P('s1tank', 't37-xl', 'dec1', { kind: 'below' }, 1, 22);
+  freighter.P('s1eng', 'e-merlin-1d', 's1tank', { kind: 'below' }, 9);
+  freighter.P('fins', 'fin-l', 's1tank', { kind: 'radial', angle: Math.PI / 8, y: 1.3 }, 8);
+
+  // Test Lander — kerolox Rutherford pair with legs: the drop-test and
+  // suicide-burn workhorse (deep throttle, five spark relights).
+  const lander = make('Test Lander');
+  lander.P('root', 'probe', null, { kind: 'below' });
+  lander.P('tank', 't12-s', 'root', { kind: 'below' });
+  lander.P('eng', 'e-rutherford', 'tank', { kind: 'below' }, 2);
+  lander.P('legs', 'leg-s', 'tank', { kind: 'radial', angle: 0.3, y: 0.8 }, 4);
+  lander.P('fins', 'fin-m', 'tank', { kind: 'radial', angle: 1.1, y: 0.8 }, 8);
+
+  // Moon Hopper — the hypergolic answer: pressure-fed AJ10 lights in
+  // freefall every time (no ullage, no ignition budget), at the price of
+  // Isp and thrust. Vacuum nozzle: moon duty only — it separates and
+  // dies below ~5 kPa ambient. Pair it with a delivery stack.
+  const hopper = make('Moon Hopper');
+  hopper.P('root', 'probe', null, { kind: 'below' });
+  hopper.P('rcs', 'rcs-quad', 'root', { kind: 'radial', angle: 0.5, y: 0.45 }, 2);
+  hopper.P('tank', 'hyp12', 'root', { kind: 'below' }, 1, 2.2);
+  hopper.P('eng', 'e-aj10', 'tank', { kind: 'below' });
+  hopper.P('legs', 'leg-s', 'tank', { kind: 'radial', angle: 0.3, y: 1.1 }, 4);
 
   return [
     { name: 'Reference Orbiter', craft: referenceCraft() },
-    { name: 'Heavy Lifter', craft: heavy },
-    { name: 'Recovery Capsule', craft: recovery },
-    { name: 'Test Lander', craft: lander },
-    { name: 'Escape Probe', craft: escape },
+    { name: 'Heavy Lifter', craft: heavy.craft },
+    { name: 'Crew Ferry', craft: ferry.craft },
+    { name: 'Moon Freighter', craft: freighter.craft },
+    { name: 'Test Lander', craft: lander.craft },
+    { name: 'Moon Hopper', craft: hopper.craft },
   ];
 }
 
@@ -229,9 +261,20 @@ export function removePartSplice(craft: Craft, id: string): string[] {
 export interface Placement {
   part: CraftPart;
   def: PartDef;
+  /** Effective axial height [m] — def.height, or the part's parametric
+   * length for tanks. Renderers scale the mesh Y by height/def.height. */
+  height: number;
   /** World transform per symmetry instance: x/z center, y of part bottom,
    * plus the instance angle around the vehicle axis. */
   instances: { x: number; y: number; z: number; angle: number }[];
+}
+
+/** Effective axial height of a part (parametric tanks override the def). */
+export function partHeight(part: CraftPart, defn: PartDef): number {
+  if (part.length !== undefined && defn.lengthRange) {
+    return Math.min(defn.lengthRange.max, Math.max(defn.lengthRange.min, part.length));
+  }
+  return defn.height;
 }
 
 /**
@@ -253,11 +296,13 @@ export function placements(craft: Craft): Map<string, Placement> {
   ): void => {
     const part = craft.parts[id]!;
     const def = partById(part.defId);
+    const h = partHeight(part, def);
     const inst = copies.map((c) => ({ x: x + c.x, y, z: z + c.z, angle: c.angle }));
-    out.set(id, { part, def, instances: inst });
+    out.set(id, { part, def, height: h, instances: inst });
 
     for (const child of children(craft, id)) {
       const cDef = partById(child.defId);
+      const cH = partHeight(child, cDef);
       if (child.attach.kind === 'below') {
         let cCopies = copies;
         // Engine cluster: n nozzles in a ring (plus center when it fits).
@@ -279,14 +324,15 @@ export function placements(craft: Craft): Map<string, Placement> {
             })),
           );
         }
-        walk(child.id, x, y - cDef.height, z, baseAngle, cCopies);
+        walk(child.id, x, y - cH, z, baseAngle, cCopies);
       } else if (child.attach.kind === 'above') {
-        walk(child.id, x, y + def.height, z, baseAngle, copies);
+        walk(child.id, x, y + h, z, baseAngle, copies);
       } else {
         // Radial: n instances around the parent's axis. Bodies stand off
-        // side-by-side; fins mount flush on the surface.
+        // side-by-side; fins mount flush; fairing shells sit centered
+        // around the stack.
         const pr = radiusAt(def, child.attach.y);
-        const dist = cDef.fin ? pr : pr + cDef.maxRadius;
+        const dist = cDef.fin ? pr : cDef.fairing ? 0 : pr + cDef.maxRadius;
         const newCopies: { x: number; z: number; angle: number }[] = [];
         for (const c of copies) {
           for (let k = 0; k < child.symmetry; k++) {
@@ -295,8 +341,10 @@ export function placements(craft: Craft): Map<string, Placement> {
             newCopies.push({ x: c.x + Math.cos(a) * dist, z: c.z + Math.sin(a) * dist, angle: a });
           }
         }
-        // Center the radial child's own segments about its attach height.
-        walk(child.id, x, y + child.attach.y - cDef.height / 2, z, baseAngle, newCopies);
+        // Center the radial child's own segments about its attach height;
+        // fairing shells grow upward from their mount ring instead.
+        const cy = cDef.fairing ? y + child.attach.y : y + child.attach.y - cH / 2;
+        walk(child.id, x, cy, z, baseAngle, newCopies);
       }
     }
   };

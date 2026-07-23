@@ -1,154 +1,329 @@
-// Part roster: real engines with published figures, tanks with realistic
-// structural fractions. Every figure carries its source; values that are
-// derived or estimates (not published) are flagged as such.
+// Part roster: real engines with published figures, tanks defined by
+// VOLUME (dry mass scales with volume — see propellants.ts). Every figure
+// carries its source; derived or estimated values are flagged as such.
 //
-// Model note: the sim keeps ṁ constant (= F_vac/(g₀·Isp_vac)) and varies
-// thrust linearly with ambient pressure. Publishing all four of
-// {F_sl, F_vac, Isp_sl, Isp_vac} over-determines that model, so where a
-// manufacturer publishes only three, the fourth is derived for exact
-// self-consistency (F_vac = F_sl·Isp_vac/Isp_sl) and marked "derived".
+// Model notes:
+// - ṁ = F_vac/(g₀·Isp_vac) is constant; thrust varies linearly with
+//   ambient pressure at fixed ṁ. Where a manufacturer publishes only
+//   three of {F_sl, F_vac, Isp_sl, Isp_vac}, the fourth is derived for
+//   self-consistency and marked "derived".
+// - maxAmbientPressure is derived per engine via the Summerfield
+//   criterion (flow separates when p_exit < ~0.4·p_ambient) using the
+//   published expansion ratio and chamber pressure; firing above the
+//   limit DESTROYS the engine (separation side loads), it does not
+//   merely underperform.
+// - Solids: rated thrust = total impulse (prop·g₀·Isp_vac) / burn time,
+//   so the constant-ṁ model reproduces the real burn duration; the
+//   thrust curve is digitized approximately from published thrust-time
+//   plots and normalized to that rating.
 
 import { Engine, Tank } from './vehicle';
+import { propellantById, TANK_STRUCTURE_KG_PER_M3 } from './propellants';
 
 export const ENGINES: readonly Engine[] = [
+  // ---------------- kerolox ----------------
   {
     id: 'merlin-1d',
     name: 'Merlin 1D',
-    // F_sl 845 kN (190,000 lbf) — SpaceX Falcon 9 vehicle page.
-    thrustSL: 845_000,
-    // F_vac derived = 845·(311/282) ≈ 932 kN. SpaceX has published no clean
-    // Block-5 vacuum thrust (a 2016 announcement targeted 914 kN).
-    thrustVac: 931_861,
-    // Isp 282 s SL / 311 s vac — SpaceX Falcon User's Guide figures.
-    ispSL: 282,
+    propellant: 'kerolox',
+    thrustSL: 845_000, // 190,000 lbf — SpaceX Falcon 9 page
+    thrustVac: 931_861, // derived = 845·(311/282)
+    ispSL: 282, // Falcon User's Guide
     ispVac: 311,
-    // 470 kg incl. TVC actuators — Tom Mueller (SpaceX propulsion CTO), 2015.
-    mass: 470,
+    mass: 470, // incl. TVC — Tom Mueller (SpaceX), 2015
     vacuumOnly: false,
-    // Throttle 40% reported for Merlin 1D (SpaceX statements, not a formal
-    // datasheet figure — treat as an estimate). TEA-TEB igniter capacity
-    // sized for the flown boostback/entry/landing profile: 3 lights
-    // (ESTIMATE from flight profiles; never published).
-    minThrottle: 0.4,
-    ignitions: 3,
+    source: 'SpaceX Falcon 9 page + Falcon User Guide; F_vac derived; mass T. Mueller 2015',
+    throttleable: true,
+    minThrottle: 0.4, // reported ~40% (SpaceX statements — estimate)
+    ignitions: 3, // TEA-TEB igniter sized for boostback/entry/landing (profile estimate)
+    gimbalDeg: 5, // not formally published; F9 TVC class — ESTIMATE
+    expansionRatio: 16, // SpaceX published
+    maxAmbientPressure: Infinity, // sea-level nozzle
+    ullageImmune: false,
   },
   {
     id: 'merlin-vac',
     name: 'Merlin 1D Vacuum',
+    propellant: 'kerolox',
     thrustSL: 0,
-    // 981 kN (220,500 lbf) — SpaceX Falcon 9 page.
-    thrustVac: 981_000,
+    thrustVac: 981_000, // 220,500 lbf — SpaceX
     ispSL: 0,
-    // 348 s — SpaceX Falcon 9 page.
-    ispVac: 348,
-    // ESTIMATE ~600 kg (M1D 470 kg + nozzle extension); never published.
-    mass: 600,
-    vacuumOnly: true, // radiatively-cooled nozzle would flow-separate at 1 atm
-    // ~39% reported minimum (SpaceX statements — estimate). Multi-burn GTO
-    // missions demonstrate 3 lights routinely (ESTIMATE from profiles).
-    minThrottle: 0.39,
-    ignitions: 3,
+    ispVac: 348, // SpaceX
+    mass: 600, // ESTIMATE (M1D + radiatively cooled extension); never published
+    vacuumOnly: true,
+    source: 'SpaceX Falcon 9 page; mass estimate flagged; ε 165 published',
+    throttleable: true,
+    minThrottle: 0.39, // reported minimum (estimate)
+    ignitions: 3, // multi-burn GTO missions routine (profile estimate)
+    gimbalDeg: 5, // ESTIMATE, M1D-class TVC
+    expansionRatio: 165,
+    // Summerfield: p_exit ≈ 5.3 kPa (ε 165, Pc 9.7 MPa, γ≈1.22) → separation
+    // above ~13 kPa ambient (≈15 km). Derived.
+    maxAmbientPressure: 13_000,
+    ullageImmune: false,
   },
   {
-    id: 'rs-25',
-    name: 'RS-25',
-    // Figures at 109% RPL (SLS operating point) — L3Harris/Aerojet Rocketdyne
-    // RS-25 page & NASA SLS fact sheet: 1860 kN SL / 2279 kN vac.
-    thrustSL: 1_860_000,
-    thrustVac: 2_279_000,
-    // 366 s SL / 452.3 s vac — L3Harris RS-25 page. (Published pair is ~1%
-    // off the constant-ṁ model; kept as published, display-only for SL.)
-    ispSL: 366,
-    ispVac: 452.3,
-    // 3527 kg (7,775 lb) — Aerojet Rocketdyne data.
-    mass: 3_527,
+    id: 'rd-180',
+    name: 'RD-180',
+    propellant: 'kerolox',
+    thrustSL: 3_827_000, // 860.6 klbf — P&W/ULA Atlas V data
+    thrustVac: 4_152_000, // 933.4 klbf — same
+    ispSL: 311.3, // ULA/P&W fact sheet
+    ispVac: 337.8,
+    mass: 5_480, // dry — P&W fact sheet
     vacuumOnly: false,
-    // NASA: 67%-109% RPL power range; our rated point is 109%, so the
-    // floor is 67/109. Ground-lit only — no flight restart capability.
-    minThrottle: 67 / 109,
-    ignitions: 1,
-  },
-  {
-    id: 'raptor-2',
-    name: 'Raptor 2',
-    // F_sl 2256 kN (230 tf) — SpaceX post, Aug 2024.
-    thrustSL: 2_256_000,
-    // F_vac derived = 2256·(347/327) ≈ 2394 kN; not separately published.
-    thrustVac: 2_393_982,
-    // Isp 327 s SL (Starship presentation 2018) / 347 s vac (SpaceX, 2024).
-    ispSL: 327,
-    ispVac: 347,
-    // 1630 kg engine-only — SpaceX post, Aug 2024.
-    mass: 1_630,
-    vacuumOnly: false,
-    // ~50% reported minimum (SpaceX statements — estimate). Spark-torch
-    // ignition, designed for unlimited in-flight relights.
-    minThrottle: 0.5,
-    ignitions: Infinity,
-  },
-  {
-    id: 'rl10b-2',
-    name: 'RL10B-2',
-    thrustSL: 0,
-    // 110.1 kN (24,750 lbf) — L3Harris RL10 page / ULA Delta IV page.
-    thrustVac: 110_100,
-    ispSL: 0,
-    // 465.5 s — L3Harris and ULA both list it.
-    ispVac: 465.5,
-    // 301 kg (664 lb) — Aerojet/L3Harris fact sheet.
-    mass: 301,
-    vacuumOnly: true, // 280:1 extendable nozzle, upper-stage only
-    // Fixed-thrust in flight (RL10B-2 is not throttleable). Multiple-
-    // restart qualified; typical mission profiles use up to 3 lights
-    // (ESTIMATE - qualification numbers are not public).
-    minThrottle: 1,
-    ignitions: 3,
+    source: 'Pratt & Whitney / ULA RD-180 and Atlas V data sheets',
+    throttleable: true,
+    minThrottle: 0.47, // 47–100% continuous throttle — ULA published
+    ignitions: 1, // ground-lit, no flight restart on Atlas V
+    gimbalDeg: 8, // ±8° — ULA
+    expansionRatio: 36.9, // published
+    maxAmbientPressure: Infinity, // sea-level engine
+    ullageImmune: false,
   },
   {
     id: 'rutherford',
     name: 'Rutherford',
-    // F_sl 24.9 kN (5,600 lbf) — Electron Payload User's Guide. (Rocket
-    // Lab's site currently rounds to 24 kN; sources disagree.)
-    thrustSL: 24_900,
-    // F_vac derived = 24.9·(311/303) ≈ 25.6 kN.
-    thrustVac: 25_557,
-    // Isp_vac 311 s — Rocket Lab Electron pages. Isp_sl is NOT published:
-    // 303 s is a circulated ESTIMATE (low confidence).
-    ispSL: 303,
+    propellant: 'kerolox',
+    thrustSL: 24_900, // Electron Payload User's Guide
+    thrustVac: 25_557, // derived = 24.9·(311/303)
+    ispSL: 303, // circulated ESTIMATE (low confidence); vac 311 published
     ispVac: 311,
-    // 35 kg — Rocket Lab, "100th Rutherford Engine Build".
-    mass: 35,
+    mass: 35, // Rocket Lab, 100th engine build
     vacuumOnly: false,
-    // Electric-pump feed makes deep throttling plausible; no figure is
-    // published - 20% is a LOW-CONFIDENCE ESTIMATE. Relights: spark-torch
-    // ignition with electric pumps has no igniter-fluid budget, and the
-    // second stage performs restart burns; qualification numbers are not
-    // public - 5 lights is an ESTIMATE (a two-burn powered landing plus
-    // terminal pulses fits; unlimited felt too generous for batteries).
-    minThrottle: 0.2,
-    ignitions: 5,
+    source: 'Rocket Lab Electron pages / Payload User Guide; Isp_sl estimate flagged',
+    throttleable: true,
+    minThrottle: 0.2, // LOW-CONFIDENCE ESTIMATE (electric pumps: deep throttle plausible)
+    ignitions: 5, // spark-torch + electric pumps; ESTIMATE (battery-limited)
+    gimbalDeg: 5, // ESTIMATE
+    expansionRatio: 14, // ESTIMATE (sea-level Rutherford; not published)
+    maxAmbientPressure: Infinity,
+    ullageImmune: false,
+  },
+  // ---------------- methalox ----------------
+  {
+    id: 'raptor-2',
+    name: 'Raptor 2',
+    propellant: 'methalox',
+    thrustSL: 2_256_000, // 230 tf — SpaceX post, Aug 2024
+    thrustVac: 2_393_982, // derived = 2256·(347/327)
+    ispSL: 327, // Starship presentation 2018
+    ispVac: 347, // SpaceX 2024
+    mass: 1_630, // engine-only — SpaceX post, Aug 2024
+    vacuumOnly: false,
+    source: 'SpaceX posts/presentations (2018–2024); F_vac derived; ε ≈ 34 (Raptor SL class, approximate)',
+    throttleable: true,
+    minThrottle: 0.5, // ~50% reported (SpaceX statements — estimate)
+    ignitions: Infinity, // spark-torch ignition, designed for unlimited relights
+    gimbalDeg: 5, // not published — ESTIMATE (SL center-engine TVC class)
+    expansionRatio: 34.3, // Raptor sea-level nozzle class — approximate
+    maxAmbientPressure: Infinity,
+    ullageImmune: false,
+  },
+  // ---------------- hydrolox ----------------
+  {
+    id: 'rs-25',
+    name: 'RS-25',
+    propellant: 'hydrolox',
+    thrustSL: 1_860_000, // 109% RPL — L3Harris/NASA SLS
+    thrustVac: 2_279_000,
+    ispSL: 366, // published pair ~1% off constant-ṁ; kept as published
+    ispVac: 452.3,
+    mass: 3_527, // 7,775 lb — Aerojet Rocketdyne
+    vacuumOnly: false,
+    source: 'L3Harris/Aerojet Rocketdyne RS-25 page; NASA SLS fact sheet',
+    throttleable: true,
+    minThrottle: 67 / 109, // NASA: 67–109% RPL; our rating is the 109% point
+    ignitions: 1, // ground-lit only — no flight restart
+    gimbalDeg: 10.5, // ±10.5° pitch/yaw — NASA
+    expansionRatio: 69, // published
+    maxAmbientPressure: Infinity, // runs at sea level (Pc 20.6 MPa)
+    ullageImmune: false,
+  },
+  {
+    id: 'j-2',
+    name: 'J-2',
+    propellant: 'hydrolox',
+    thrustSL: 0,
+    thrustVac: 1_033_100, // 232,250 lbf — NASA Saturn V references (SP-4206)
+    ispSL: 0,
+    ispVac: 421, // NASA
+    mass: 1_788, // 3,942 lb — NASA
+    vacuumOnly: true,
+    source: 'NASA Saturn V / J-2 references (SP-4206 class); ε 27.5, Pc 5.26 MPa published',
+    throttleable: false,
+    minThrottle: 1, // fixed thrust (two-position MR shift not modeled)
+    ignitions: 2, // S-IVB flew one restart — the canonical ullage customer
+    gimbalDeg: 7, // ±7° class on S-IVB — NASA
+    expansionRatio: 27.5,
+    // Summerfield: p_exit ≈ 32 kPa (ε 27.5, Pc 5.26 MPa) → separation above
+    // ~80 kPa (≈2 km). Derived — an upper-stage engine that survives a
+    // high-altitude air start but not a pad start.
+    maxAmbientPressure: 80_000,
+    ullageImmune: false,
+  },
+  {
+    id: 'rl10b-2',
+    name: 'RL10B-2',
+    propellant: 'hydrolox',
+    thrustSL: 0,
+    thrustVac: 110_100, // 24,750 lbf — L3Harris / ULA Delta IV
+    ispSL: 0,
+    ispVac: 465.5, // deployed (285:1) — L3Harris/ULA
+    mass: 301, // 664 lb — fact sheet
+    vacuumOnly: true,
+    source: 'L3Harris RL10 / ULA Delta IV data; extendable nozzle 285:1 published',
+    throttleable: false,
+    minThrottle: 1, // fixed thrust in flight
+    ignitions: 3, // multiple-restart qualified; typical profiles ≤3 (ESTIMATE)
+    gimbalDeg: 4, // EMA TVC, ±4° class — ULA (approximate)
+    expansionRatio: 285,
+    // Summerfield: p_exit ≈ 1.3 kPa (ε 285, Pc 4.4 MPa) → separation above
+    // ~3.3 kPa (≈20 km). Derived.
+    maxAmbientPressure: 3_300,
+    ullageImmune: false,
+    // Stowed: the fixed portion of the bell (~77:1 per the design brief;
+    // stowed Isp derived −30 s). Deploy before full-performance burns.
+    nozzleExtension: { stowedExpansionRatio: 77, stowedIspVac: 435.5, stowedMaxAmbientPressure: 16_000 },
+  },
+  // ---------------- hypergolic ----------------
+  {
+    id: 'aj10-190',
+    name: 'AJ10-190 (OMS)',
+    propellant: 'hypergolic',
+    thrustSL: 0,
+    thrustVac: 26_700, // 6,000 lbf — Aerojet/NASA Shuttle OMS
+    ispSL: 0,
+    ispVac: 316, // NASA Shuttle OMS
+    mass: 118, // Aerojet
+    vacuumOnly: true,
+    source: 'Aerojet Rocketdyne / NASA Space Shuttle OMS engine data',
+    throttleable: false,
+    minThrottle: 1, // pressure-fed, fixed thrust
+    ignitions: Infinity, // qualified for hundreds of starts (OMS: 1000-start class)
+    gimbalDeg: 6, // OMS pitch/yaw class — NASA
+    expansionRatio: 55, // published
+    // Summerfield: p_exit ≈ 1.9 kPa (ε 55, Pc 0.86 MPa) → ~4.7 kPa limit.
+    maxAmbientPressure: 4_700,
+    // Pressure-fed with propellant-management devices (surface-tension
+    // screens hold liquid at the outlet): lights in freefall, every time.
+    // This is the reliable, low-Isp answer to the ullage problem — its
+    // reason to exist.
+    ullageImmune: true,
+  },
+  // ---------------- solids ----------------
+  {
+    id: 'gem-40',
+    name: 'GEM-40 (solid)',
+    propellant: 'solid',
+    // Rated = total impulse / burn: 11,766 kg × g₀ × 274 s / 63.3 s.
+    thrustSL: 452_000, // SL ≈ vac × (267/274): SL Isp ~267 (Delta II class)
+    thrustVac: 499_500,
+    ispSL: 267,
+    ispVac: 274, // Delta II payload planners guide (GEM-40 class figures)
+    mass: 1_361, // inert (case + nozzle) — Delta II GEM data
+    vacuumOnly: false,
+    source: 'Boeing/NG Delta II GEM-40 data (prop 11,766 kg, 63.3 s, Isp 274); rating derived from total impulse',
+    throttleable: false,
+    minThrottle: 1,
+    ignitions: 1,
+    gimbalDeg: 0, // fixed nozzle
+    expansionRatio: 16, // ESTIMATE (not published for GEM-40)
+    maxAmbientPressure: Infinity,
+    ullageImmune: true,
+    // Regressive grain, approximated from Delta II GEM thrust-time plots.
+    thrustCurve: [
+      [0, 1.12],
+      [0.25, 1.15],
+      [0.55, 1.0],
+      [0.85, 0.8],
+      [0.96, 0.5],
+      [1, 0],
+    ],
+  },
+  {
+    id: 'rsrm',
+    name: 'RSRM (solid)',
+    propellant: 'solid',
+    // Rated = total impulse / burn: 501,700 kg × g₀ × 268.2 s / 123.4 s.
+    thrustSL: 10_200_000, // SL ≈ vac × (242/268.2): SL Isp 242 — NASA
+    thrustVac: 10_695_000,
+    ispSL: 242,
+    ispVac: 268.2, // NASA RSRM data
+    mass: 87_300, // inert (steel case, nozzle, TVC) — NASA
+    vacuumOnly: false,
+    source: 'NASA Space Shuttle RSRM data (prop 501.7 t, 123.4 s, Isp 268.2/242); rating derived from total impulse; curve digitized approximately from NASA thrust-time plots',
+    throttleable: false,
+    minThrottle: 1,
+    ignitions: 1,
+    gimbalDeg: 8, // ±8° flex-bearing TVC — NASA
+    expansionRatio: 7.7, // published (7.72)
+    maxAmbientPressure: Infinity,
+    ullageImmune: true,
+    // The mid-burn thrust reduction for max-q relief is grain-shaped and
+    // deliberate — the canonical thrust-curve example. It must be visible
+    // in the flight data.
+    thrustCurve: [
+      [0, 1.05],
+      [0.16, 1.25],
+      [0.35, 0.95],
+      [0.45, 0.78], // max-q bucket, t ≈ 50–60 s
+      [0.55, 0.8],
+      [0.7, 1.0],
+      [0.85, 0.95],
+      [0.94, 0.55],
+      [1, 0],
+    ],
+  },
+  {
+    id: 'tx-280',
+    name: 'TX-280 ullage motor (solid)',
+    propellant: 'solid',
+    // Saturn S-II class ullage motor: ~15.1 kN for ~3.9 s (NASA Saturn V
+    // references). Prop from impulse: 15.1 kN × 3.87 s / (g₀·235 s) ≈ 25 kg.
+    thrustSL: 14_800,
+    thrustVac: 15_100,
+    ispSL: 230, // small-solid class — ESTIMATE
+    ispVac: 235,
+    mass: 27, // case inert — ESTIMATE (loaded ~52 kg)
+    vacuumOnly: false,
+    source: 'NASA Saturn V S-II ullage motor references (TX-280 class, 15.1 kN / 3.87 s); Isp and case mass estimates flagged',
+    throttleable: false,
+    minThrottle: 1,
+    ignitions: 1,
+    gimbalDeg: 0,
+    expansionRatio: 8, // ESTIMATE
+    maxAmbientPressure: Infinity,
+    ullageImmune: true,
+    thrustCurve: [
+      [0, 1.1],
+      [0.8, 1.0],
+      [1, 0],
+    ],
   },
 ];
 
-// Tank structure ≈ 4.5% of propellant mass (engines are separate parts).
-// Basis: Falcon 9 FT stage estimates (spaceflight101.com): S1 22.2 t dry
-// incl. ~4.2 t engines over 411 t propellant → tank+structure ≈ 4.4%;
-// S2 ≈ 3.2%. 4.5% is a mild conservative round-up for smaller tanks.
-const TANK_STRUCTURE_FRACTION = 0.045;
+// ---------------- tanks (volume-first) ----------------
 
-const tank = (id: string, name: string, propellantMass: number): Tank => ({
+const tank = (id: string, name: string, fluid: 'kerolox' | 'hydrolox' | 'hypergolic', volume: number): Tank => ({
   id,
   name,
-  propellantMass,
-  dryMass: Math.round(propellantMass * TANK_STRUCTURE_FRACTION),
+  fluid,
+  volume,
+  propellantMass: Math.round(volume * propellantById(fluid).bulkDensity),
+  dryMass: Math.round(volume * TANK_STRUCTURE_KG_PER_M3),
+  source: 'Structure 35 kg/m³ derived from F9 S2 + Saturn S-IVB structural fractions (propellants.ts)',
 });
 
+/** Legacy fixed tanks (test vehicles); the builder's tanks are parametric
+ * (fluid × diameter, length as a build-time parameter). Volumes chosen to
+ * keep the historical kerolox load labels. */
 export const TANKS: readonly Tank[] = [
-  tank('tank-xs', 'Tank XS (2 t)', 2_000),
-  tank('tank-s', 'Tank S (10 t)', 10_000),
-  tank('tank-m', 'Tank M (40 t)', 40_000),
-  tank('tank-l', 'Tank L (110 t)', 110_000),
-  tank('tank-xl', 'Tank XL (400 t)', 400_000),
+  tank('tank-xs', 'Tank XS (2 t kerolox)', 'kerolox', 1.955),
+  tank('tank-s', 'Tank S (10 t kerolox)', 'kerolox', 9.775),
+  tank('tank-m', 'Tank M (40 t kerolox)', 'kerolox', 39.1),
+  tank('tank-l', 'Tank L (110 t kerolox)', 'kerolox', 107.53),
+  tank('tank-xl', 'Tank XL (400 t kerolox)', 'kerolox', 391.0),
 ];
 
 export const engineById = (id: string): Engine => {

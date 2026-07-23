@@ -3,30 +3,64 @@
 // (per-stage Δv, TWR at ignition and burnout).
 
 import { G0, MU_EARTH, R_EARTH, P0_SEA_LEVEL } from './constants';
+import { PropellantId } from './propellants';
 
 export interface Engine {
   id: string;
   name: string;
+  /** Propellant the engine burns — REQUIRED on all propulsion. */
+  propellant: PropellantId;
   thrustSL: number; // sea-level thrust [N] (0 for vacuum-only engines)
   thrustVac: number; // vacuum thrust [N]
   ispSL: number; // sea-level specific impulse [s] (0 for vacuum-only)
   ispVac: number; // vacuum specific impulse [s]
   mass: number; // engine dry mass [kg]
-  vacuumOnly: boolean; // nozzle can't run at sea level (flow separation)
+  vacuumOnly: boolean; // no published sea-level point (thrust extrapolated)
+  /** Machine-checked citation — the validator rejects unsourced parts. */
+  source: string;
+  /** Must equal (minThrottle < 1); validated. Solids are never throttleable. */
+  throttleable: boolean;
   /** Deepest stable throttle setting [fraction of rated]. 1 = fixed
    * thrust (no in-flight throttling). Commands below this run AT this —
    * an engine cannot run below its floor. */
   minThrottle: number;
   /** Total ignitions available (first light included); Infinity for
-   * spark-ignition engines designed for unlimited restarts. */
+   * spark-ignition engines designed for unlimited restarts. Solids: 1. */
   ignitions: number;
+  /** Thrust-vector gimbal range [± degrees]; 0 = fixed nozzle. */
+  gimbalDeg: number;
+  /** Nozzle expansion ratio (deployed, for extendable nozzles). */
+  expansionRatio: number;
+  /** Ambient pressure above which nozzle flow separates [Pa]. Firing
+   * above it destroys the engine (side loads), not merely underperforms.
+   * Derived per engine via the Summerfield criterion (separation when
+   * p_exit < ~0.4·p_ambient) from published ε and chamber pressure;
+   * Infinity for sea-level nozzles. */
+  maxAmbientPressure: number;
+  /** Immune to propellant settling requirements: pressure-fed engines
+   * with propellant-management devices (surface-tension screens), and
+   * solids. Pump-fed liquids need settled propellant to light. */
+  ullageImmune: boolean;
+  /** Solid grain thrust curve: [burn fraction 0..1, thrust multiplier of
+   * rated]. Once lit a solid runs the curve to burnout — no throttle,
+   * no shutdown, no restart. */
+  thrustCurve?: [number, number][];
+  /** Extendable nozzle (RL10B-2): stowed performance until deployed. */
+  nozzleExtension?: { stowedExpansionRatio: number; stowedIspVac: number; stowedMaxAmbientPressure: number };
 }
 
 export interface Tank {
   id: string;
   name: string;
-  propellantMass: number; // usable propellant [kg]
-  dryMass: number; // structure [kg]
+  /** Fluid held — REQUIRED; density and boiloff follow from the registry. */
+  fluid: PropellantId;
+  /** Usable propellant volume [m³] — the primary quantity. Dry mass
+   * scales with volume (35 kg/m³, see propellants.ts), NOT with
+   * propellant mass, or the density tradeoff disappears. */
+  volume: number;
+  propellantMass: number; // usable propellant [kg] = volume × ρ_bulk
+  dryMass: number; // structure [kg] = volume × 35
+  source: string;
 }
 
 /** N identical engines burning together. A stage may mix groups
@@ -42,6 +76,29 @@ export interface Stage {
   /** Dry mass beyond engines and tank structure (decouplers, fairings,
    * radial mounts…) jettisoned with this stage. */
   extraDryMass?: number;
+}
+
+/** One propellant pool per compiled stage (that stage's sections' tanks
+ * or solid grain). Crossfeed and parallel staging drain across pools. */
+export interface PropellantPool {
+  fluid: PropellantId;
+  mass: number;
+}
+
+/** Engines lit during a phase, with the pool indices they drain in
+ * priority order (crossfeed: an outboard pool before their own). */
+export interface BurnGroup {
+  engines: EngineGroup[];
+  drain: number[];
+  /** Compiled stage these engines belong to (failure bookkeeping). */
+  stage: number;
+}
+
+/** Phase k = burn stage k. Its trigger pool is pool k: when that empties
+ * the phase ends (stage separation drops those sections). Parallel
+ * staging: a strap-on phase's groups include the sustainer's engines. */
+export interface PhasePlan {
+  groups: BurnGroup[];
 }
 
 export interface Vehicle {
@@ -60,6 +117,46 @@ export interface Vehicle {
   /** Reaction-control torque authority [N·m] (cold-gas RCS class, from the
    * payload pod). ~1.6 kN·m for a crewed-capsule Draco-class couple. */
   rcsTorque?: number;
+  /** Propellant pools + burn phases (parallel staging / crossfeed).
+   * Absent = serial: each stage drains its own tanks. */
+  pools?: PropellantPool[];
+  phases?: PhasePlan[];
+  /** RCS translation thrust usable for ullage settling [N]. */
+  rcsThrust?: number;
+  /** Self-contained RCS propellant budget [kg]. */
+  rcsPropellant?: number;
+  /** CMG torque [N·m] and momentum capacity [N·m·s] before saturation. */
+  wheelTorque?: number;
+  wheelCapacity?: number;
+  /** Active-fin control torque per unit dynamic pressure [N·m/Pa]. */
+  finControlPerQ?: number;
+  /** Per-stage drag state: cd and frontal area with fairings attached
+   * and after fairing jettison, indexed by stageIndex. */
+  drag?: { cdFaired: number[]; cdBare: number[]; areaFaired: number[]; areaBare: number[] };
+  /** Dedicated solid ullage motors carried (count). */
+  ullageMotors?: number;
+  /** Dry mass jettisoned when phase k ends — the SECTION's own dry mass.
+   * (stages[k].engines is the parallel-burn union, so summing engine
+   * masses from it would double-count sustainer engines.) */
+  sepMass?: number[];
+  /** Stage k is a strap-on burning in parallel with the sustainer. */
+  strapOn?: boolean[];
+}
+
+/** Thrust-curve multiplier for a solid at burn fraction x (0 = full
+ * grain, 1 = burnout): linear interpolation over the published curve. */
+export function thrustCurveAt(e: Engine, burnFraction: number): number {
+  const c = e.thrustCurve;
+  if (!c || c.length === 0) return 1;
+  const x = Math.min(1, Math.max(0, burnFraction));
+  for (let i = 1; i < c.length; i++) {
+    if (x <= c[i]![0]) {
+      const [t0, f0] = c[i - 1]!;
+      const [t1, f1] = c[i]!;
+      return f0 + ((f1 - f0) * (x - t0)) / (t1 - t0 || 1e-9);
+    }
+  }
+  return c[c.length - 1]![1];
 }
 
 /**
@@ -126,6 +223,11 @@ export function stageWetMass(s: Stage): number {
 
 /** Total vehicle mass with stages i..end attached and all propellant loaded. */
 export function massFromStage(v: Vehicle, i: number): number {
+  if (v.sepMass && v.pools) {
+    let m = v.payloadMass;
+    for (let k = i; k < v.stages.length; k++) m += v.sepMass[k]! + v.pools[k]!.mass;
+    return m;
+  }
   let m = v.payloadMass;
   for (let k = i; k < v.stages.length; k++) m += stageWetMass(v.stages[k]!);
   return m;

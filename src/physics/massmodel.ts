@@ -63,6 +63,8 @@ export interface VehicleGeometry {
   length: number; // full-stack length [m]
   legs: LegInfo[];
   chutes: ChuteInfo[];
+  /** Jettisonable payload fairings (deploy mechanism). */
+  fairings?: { partId: string; mass: number }[];
 }
 
 export interface MassProperties {
@@ -82,13 +84,15 @@ export interface MassProperties {
 /**
  * Mass properties of the currently attached assembly.
  * @param stageIndex stages < stageIndex are gone
- * @param propFraction remaining propellant fraction of the CURRENT stage
+ * @param propFraction remaining propellant fraction of the CURRENT stage,
+ *   or a per-stage array of fill fractions (crossfeed drains other
+ *   sections' tanks, so fills are not a single scalar).
  * @param torn part ids shed by aerodynamic failure
  */
 export function massProperties(
   geom: VehicleGeometry,
   stageIndex: number,
-  propFraction: number,
+  propFraction: number | number[],
   torn?: ReadonlySet<string>,
 ): MassProperties {
   let m = 0;
@@ -100,7 +104,11 @@ export function massProperties(
     // Dry structure: centroid at the part's geometric center.
     items.push({ m: p.dryMass, y: p.y + p.height / 2, h: p.height, r: p.radius, lat: p.lateral });
     if (p.propellant > 0) {
-      const f = p.stage === stageIndex ? propFraction : 1;
+      const f = Array.isArray(propFraction)
+        ? (propFraction[p.stage] ?? 1)
+        : p.stage === stageIndex
+          ? propFraction
+          : 1;
       if (f > 0) {
         // Propellant settles: a column of height f·h starting at the tank
         // bottom, centroid at f·h/2.

@@ -106,12 +106,18 @@ export class Autopilot {
         sim.attitude = { mode: 'prograde' };
         // Ignite so the burn straddles apoapsis: start at half the burn time.
         const tBurn = this.burnTime(sim, this.circularizationDv(sim));
+        // Ullage: pump-fed relight needs settled propellant — run the RCS
+        // settle burn through the final approach to ignition (Saturn/
+        // Centaur practice: settle a few seconds, light inside the window).
+        sim.rcsSettle = el.timeToApo <= tBurn / 2 + 12;
         if (el.timeToApo <= tBurn / 2 || el.timeToApo > el.period / 2 + tBurn) {
           this.phase = 'circularize';
         }
         break;
       }
       case 'circularize': {
+        // Hold the settle until the engine is clearly up, then release.
+        sim.rcsSettle = sim.actualThrottle < 0.3;
         // Prograde burn with an ENERGY cutoff. Prograde thrust keeps the
         // steering loss near zero (any off-velocity component of a long
         // insertion burn shows up 1:1 as steering loss); cutting off when

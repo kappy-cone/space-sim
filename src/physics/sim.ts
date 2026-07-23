@@ -34,6 +34,7 @@ import { machDragFactor, speedOfSound } from './atmosphere';
 import { Vec2, add, cross, dot, norm, perp, scale, sub, vec, fromAngle } from './vec2';
 import {
   Vehicle,
+  massFlow,
   massFromStage,
   stageDryMass,
   stageIgnitionLimit,
@@ -41,7 +42,11 @@ import {
   stageMinThrottle,
   stagePropellant,
   stageThrustAtPressure,
+  thrustAtPressure,
+  thrustCurveAt,
 } from './vehicle';
+import { propellantById } from './propellants';
+import { G0 } from './constants';
 
 export type Attitude =
   | { mode: 'vertical' }
@@ -62,6 +67,11 @@ export type SimEvent =
   | { type: 'landed'; t: number; vSpeed: number; hSpeed: number; tilt: number }
   | { type: 'soiTransition'; t: number; from: string; to: string }
   | { type: 'ignitionFailed'; t: number; stage: number; limit: number }
+  | { type: 'flameout'; t: number; stage: number }
+  | { type: 'engineDestroyed'; t: number; stage: number; reason: string }
+  | { type: 'fairingJettisoned'; t: number }
+  | { type: 'nozzleDeployed'; t: number; stage: number }
+  | { type: 'ullageMotorFired'; t: number; remaining: number }
   | { type: 'landingFailed'; t: number; reason: string }
   | { type: 'crash'; t: number; speed: number };
 
@@ -75,6 +85,13 @@ export const TOUCHDOWN_LIMITS = {
 const MAX_POWERED_DT = 0.05;
 const GIMBAL_MAX = (5 * Math.PI) / 180;
 export const SPOOL_TAU = 0.4; // s — first-order thrust response (approximation)
+/** Freefall time after which tank propellant is no longer settled [s] —
+ * engineering ESTIMATE (surface tension and residual accelerations keep
+ * liquid at the outlet briefly; minutes-long coasts definitely unsettle). */
+export const UNSETTLE_TIME = 20;
+/** Continuous RCS settle burn needed before a pump-fed light [s]
+ * (Saturn/Centaur practice: settle for a few seconds, then ignite). */
+export const RCS_SETTLE_TIME = 3;
 const COAST_SLEW_RATE = (5 * Math.PI) / 180; // rad/s on rails
 const KP = 0.5; // PD attitude gains: ωn ≈ 0.7 rad/s, ζ ≈ 1
 const KD = 1.4;
@@ -103,6 +120,29 @@ export class Sim {
   /** Ignitions consumed per stage index (first light included). */
   readonly ignitionsUsed: number[] = [];
   private ignitionDenied = false;
+  private flameoutLatch = false;
+  /** Propellant pools by compiled stage (crossfeed/parallel staging). */
+  pools: number[] = [];
+  private pools0: number[] = [];
+  /** Stages whose engines were destroyed (flow separation). */
+  readonly engineFailed = new Set<number>();
+  private sepExposure = 0;
+  /** Solid stages that have been lit (committed to burnout). */
+  private readonly solidLit = new Set<number>();
+  /** Ullage state: seconds spent in freefall since last settled. Pump-fed
+   * liquids need < UNSETTLE_TIME to light. */
+  private unsettledTime = 0;
+  private rcsSettleTime = 0;
+  /** Player/autopilot command: burn RCS propellant to settle tanks. */
+  rcsSettle = false;
+  rcsPropellant = 0;
+  private ullageSettleUntil = -1;
+  ullageMotorsLeft = 0;
+  /** CMG accumulated momentum [N·m·s] — torque is free until saturated. */
+  wheelMomentum = 0;
+  /** Extendable nozzles deployed, by stage index. */
+  readonly nozzleDeployed = new Set<number>();
+  fairingsJettisoned = false;
   legsDeployed = false;
   chutesDeployed = false;
   q = 0;
@@ -121,8 +161,33 @@ export class Sim {
     this.body = body;
     this.geom = vehicle.geometry ?? synthesizeGeometry(vehicle.stages, vehicle.payloadMass);
     this.state = { r: vec(0, 0), v: vec(0, 0), theta: 0, omega: 0, m: massFromStage(vehicle, 0), t: 0 };
-    this.propellant = stagePropellant(vehicle.stages[0]!);
+    this.pools = vehicle.pools
+      ? vehicle.pools.map((p) => p.mass)
+      : vehicle.stages.map((s) => stagePropellant(s));
+    this.pools0 = [...this.pools];
+    this.propellant = this.pools[0] ?? 0;
+    this.rcsPropellant = vehicle.rcsPropellant ?? 0;
+    this.ullageMotorsLeft = (vehicle as { ullageMotors?: number }).ullageMotors ?? 0;
     this.pinToSurface(); // launch pad: equator, +x, nose up
+  }
+
+  /** Propellant reachable by the current phase (own pool + crossfed). */
+  private drainableMass(): number {
+    const phase = this.vehicle.phases?.[this.stageIndex];
+    if (!phase) return this.pools[this.stageIndex] ?? 0;
+    const seen = new Set<number>();
+    for (const g of phase.groups) for (const d of g.drain) if (d >= this.stageIndex) seen.add(d);
+    let sum = 0;
+    for (const d of seen) sum += this.pools[d] ?? 0;
+    return sum;
+  }
+
+  /** Per-stage propellant fill fractions for the mass model. */
+  private poolFills(): number[] {
+    return this.pools.map((m, i) => {
+      const full = this.pools0[i] ?? 0;
+      return full > 0 ? m / full : 1;
+    });
   }
 
   // ---------- geometry-derived readouts ----------
@@ -187,15 +252,26 @@ export class Sim {
     return (
       !this.crashed &&
       this.throttle > 0 &&
-      this.propellant > 0 &&
-      this.stageIndex < this.vehicle.stages.length
+      this.drainableMass() > 0 &&
+      this.stageIndex < this.vehicle.stages.length &&
+      !this.engineFailed.has(this.stageIndex)
+    );
+  }
+
+  /** Pump-fed liquids need settled propellant to light: recent thrust,
+   * surface contact, an active RCS settle, or an ullage-motor window.
+   * Freefall unsettles after UNSETTLE_TIME (engineering estimate). */
+  get settled(): boolean {
+    return (
+      this.landed ||
+      this.unsettledTime < UNSETTLE_TIME ||
+      this.state.t < this.ullageSettleUntil ||
+      this.rcsSettleTime >= RCS_SETTLE_TIME
     );
   }
 
   get massProps(): MassProperties {
-    const stage = this.vehicle.stages[this.stageIndex];
-    const full = stage ? stagePropellant(stage) : 0;
-    return massProperties(this.geom, this.stageIndex, full > 0 ? this.propellant / full : 0, this.torn);
+    return massProperties(this.geom, this.stageIndex, this.poolFills(), this.torn);
   }
 
   get bodyAxis(): Vec2 {
@@ -296,12 +372,53 @@ export class Sim {
   stage(): void {
     if (this.stageIndex >= this.vehicle.stages.length) return;
     const dropped = this.vehicle.stages[this.stageIndex]!;
-    this.state.m -= stageDryMass(dropped) + this.propellant;
+    const wasStrapOn = this.vehicle.strapOn?.[this.stageIndex] ?? false;
+    const sepDry = this.vehicle.sepMass?.[this.stageIndex] ?? stageDryMass(dropped);
+    this.state.m -= sepDry + (this.pools[this.stageIndex] ?? this.propellant);
+    this.pools[this.stageIndex] = 0;
     this.events.push({ type: 'stageSeparation', t: this.state.t, stage: this.stageIndex });
     this.stageIndex += 1;
-    const next = this.vehicle.stages[this.stageIndex];
-    this.propellant = next ? stagePropellant(next) : 0;
-    this.actualThrottle = 0; // fresh engines must spool up
+    this.propellant = this.pools[this.stageIndex] ?? 0;
+    if (wasStrapOn && this.actualThrottle > 0) {
+      // Sustainer continuation: the core was already burning through the
+      // strap-on phase — it keeps its spool state, and its first light is
+      // booked so a later shutdown/relight is charged correctly.
+      this.ignitionsUsed[this.stageIndex] = Math.max(this.ignitionsUsed[this.stageIndex] ?? 0, 1);
+    } else {
+      this.actualThrottle = 0; // fresh engines must spool up
+    }
+  }
+
+  /** Jettison all payload fairings (deploy mechanism, irreversible). */
+  jettisonFairings(): void {
+    const fairings = this.geom.fairings ?? [];
+    if (this.fairingsJettisoned || fairings.length === 0) return;
+    for (const f of fairings) {
+      this.torn.add(f.partId);
+      this.state.m -= f.mass;
+    }
+    this.fairingsJettisoned = true;
+    this.events.push({ type: 'fairingJettisoned', t: this.state.t });
+  }
+
+  /** Extend the current stage's nozzle (RL10B-2 class): +Isp, but the
+   * high-expansion bell separates at much lower ambient pressure. Only
+   * while shut down — the extension slides around a live engine. */
+  deployNozzle(): void {
+    const stage = this.vehicle.stages[this.stageIndex];
+    if (!stage || this.actualThrottle > 0.01) return;
+    if (!stage.engines.some((g) => g.engine.nozzleExtension) || this.nozzleDeployed.has(this.stageIndex)) return;
+    this.nozzleDeployed.add(this.stageIndex);
+    this.events.push({ type: 'nozzleDeployed', t: this.state.t, stage: this.stageIndex });
+  }
+
+  /** Fire one solid ullage motor: ~4 s settle window (Saturn S-II
+   * practice — settle, then light the main engine inside the window). */
+  fireUllageMotor(): void {
+    if (this.ullageMotorsLeft <= 0 || this.landed) return;
+    this.ullageMotorsLeft -= 1;
+    this.ullageSettleUntil = this.state.t + 4;
+    this.events.push({ type: 'ullageMotorFired', t: this.state.t, remaining: this.ullageMotorsLeft });
   }
 
   // ---------- stepping ----------
@@ -362,6 +479,7 @@ export class Sim {
       const err = wrapPi(this.targetAngle() - this.state.theta);
       const slew = Math.min(Math.abs(err), COAST_SLEW_RATE * used) * Math.sign(err);
       this.state = { r: arc.r, v: arc.v, theta: this.state.theta + slew, omega: 0, m: this.state.m, t: t0 + used };
+      this.coastKeeping(used, false); // boiloff + ullage clock run on rails too
       remaining -= used;
       if (target) this.reReference(target);
       this.q = 0;
@@ -440,10 +558,75 @@ export class Sim {
 
   /** comAboveGround without the massProps getter recursion at t=0. */
   private comAboveGroundStatic(): number {
-    const stage = this.vehicle.stages[this.stageIndex];
-    const full = stage ? stagePropellant(stage) : 0;
-    const props = massProperties(this.geom, this.stageIndex, full > 0 ? this.propellant / full : 0, this.torn);
+    const props = massProperties(this.geom, this.stageIndex, this.poolFills(), this.torn);
     return props.yCoM - this.attachedBottomY();
+  }
+
+  /**
+   * Per-engine-group burn outputs at ambient pressure p: thrust and mass
+   * flow at FULL throttle, the pool each group drains (first non-empty in
+   * its crossfeed priority list), the flow-separation limit (stowed
+   * nozzles separate earlier), and solid thrust-curve multipliers.
+   */
+  private groupBurns(p: number): { thrust: number; mdot: number; pool: number; maxAmb: number; stage: number }[] {
+    const out: { thrust: number; mdot: number; pool: number; maxAmb: number; stage: number }[] = [];
+    const stage = this.vehicle.stages[this.stageIndex];
+    if (!stage) return out;
+    const phase = this.vehicle.phases?.[this.stageIndex];
+    if (!phase) {
+      // Serial fallback (hand-built vehicles): the whole stage drains its
+      // own pool at published performance.
+      if (this.engineFailed.has(this.stageIndex)) return out;
+      const maxAmb = Math.min(...stage.engines.map((g) => g.engine.maxAmbientPressure), Infinity);
+      out.push({
+        thrust: stageThrustAtPressure(stage, p),
+        mdot: stageMassFlow(stage),
+        pool: this.stageIndex,
+        maxAmb,
+        stage: this.stageIndex,
+      });
+      return out;
+    }
+    for (const g of phase.groups) {
+      if (this.engineFailed.has(g.stage)) continue;
+      const grp = g.engines[0]!;
+      const e = grp.engine;
+      const pool = g.drain.find((d) => (this.pools[d] ?? 0) > 0) ?? -1;
+      if (pool < 0) continue;
+      // Nozzle extension: stowed bell wastes Isp at the same mass flow.
+      let thrustVacEff = e.thrustVac;
+      let maxAmb = e.maxAmbientPressure;
+      if (e.nozzleExtension && !this.nozzleDeployed.has(g.stage)) {
+        thrustVacEff = massFlow(e) * G0 * e.nozzleExtension.stowedIspVac;
+        maxAmb = e.nozzleExtension.stowedMaxAmbientPressure;
+      }
+      const pressureScale = e.thrustVac > 0 ? thrustAtPressure(e, p) / e.thrustVac : 0;
+      // Solid grain curve: thrust AND mass flow follow chamber pressure.
+      const curve = e.thrustCurve
+        ? thrustCurveAt(e, 1 - (this.pools[pool] ?? 0) / (this.pools0[pool] || 1))
+        : 1;
+      out.push({
+        thrust: thrustVacEff * pressureScale * grp.count * curve,
+        mdot: massFlow(e) * grp.count * curve,
+        pool,
+        maxAmb,
+        stage: g.stage,
+      });
+    }
+    return out;
+  }
+
+  /** Any lit solid still burning grain in the current phase? Solids are
+   * commitment: no throttle, no shutdown, no restart. */
+  private solidLocked(): boolean {
+    const phase = this.vehicle.phases?.[this.stageIndex];
+    if (!phase) return false;
+    for (const g of phase.groups) {
+      if (g.engines[0]!.engine.propellant === 'solid' && this.solidLit.has(g.stage) && (this.pools[g.stage] ?? 0) > 0) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -455,10 +638,39 @@ export class Sim {
    * names the limit.
    */
   private commandedThrottle(): number {
+    // A lit solid ignores the throttle entirely — grain burns to burnout.
+    if (this.solidLocked() && !this.crashed) {
+      return 1;
+    }
     if (!this.burning || this.ignitionBlocked()) return 0;
     const stage = this.vehicle.stages[this.stageIndex]!;
     if (this.actualThrottle === 0) {
+      // Ullage: pump-fed liquids need settled propellant. Lighting in
+      // freefall with unsettled tanks flames out — the ignition is spent
+      // and nothing happens. Recover: throttle to zero, settle (RCS or
+      // ullage motor), relight. Pressure-fed hypergolics and solids are
+      // immune. Prior art: KSP RealFuels.
+      const needsUllage = stage.engines.some(
+        (g) => !g.engine.ullageImmune && g.engine.propellant !== 'solid',
+      );
+      if (needsUllage && !this.settled) {
+        if (!this.flameoutLatch) {
+          this.flameoutLatch = true;
+          this.ignitionsUsed[this.stageIndex] = (this.ignitionsUsed[this.stageIndex] ?? 0) + 1;
+          this.events.push({ type: 'flameout', t: this.state.t, stage: this.stageIndex });
+        }
+        return 0;
+      }
+      // Settled: clear any flameout latch (the retry is a fresh light).
+      this.flameoutLatch = false;
       this.ignitionsUsed[this.stageIndex] = (this.ignitionsUsed[this.stageIndex] ?? 0) + 1;
+      // Light any solids sharing this phase — they are now committed.
+      const phase = this.vehicle.phases?.[this.stageIndex];
+      if (phase) {
+        for (const g of phase.groups) {
+          if (g.engines[0]!.engine.propellant === 'solid') this.solidLit.add(g.stage);
+        }
+      }
     }
     return Math.max(this.throttle, stageMinThrottle(stage));
   }
@@ -468,6 +680,7 @@ export class Sim {
   private ignitionBlocked(): boolean {
     if (!this.burning) {
       this.ignitionDenied = false;
+      this.flameoutLatch = false;
       return false;
     }
     if (this.actualThrottle > 0) return false;
@@ -481,9 +694,92 @@ export class Sim {
     return true;
   }
 
+  /** Drain the burn groups for dt at the current actual throttle;
+   * returns thrust and ṁ totals, fires burnout when the trigger pool
+   * empties, and enforces the flow-separation limit (sustained firing
+   * above an engine's ambient-pressure limit DESTROYS it — side loads —
+   * rather than merely underperforming). */
+  private applyBurns(dt: number, p: number): { thrust: number; mdot: number; drained: number } {
+    let thrust = 0;
+    let mdot = 0;
+    let drained = 0;
+    if (this.actualThrottle <= 0) {
+      this.sepExposure = Math.max(0, this.sepExposure - dt);
+      return { thrust, mdot, drained };
+    }
+    const burns = this.groupBurns(p);
+    const separating: number[] = [];
+    const hadTrigger = (this.pools[this.stageIndex] ?? 0) > 0;
+    for (const b of burns) {
+      const avail = this.pools[b.pool] ?? 0;
+      if (avail <= 0) continue;
+      const take = Math.min(avail, b.mdot * this.actualThrottle * dt);
+      this.pools[b.pool] = avail - take;
+      drained += take;
+      thrust += b.thrust * this.actualThrottle;
+      mdot += b.mdot * this.actualThrottle;
+      if (p > b.maxAmb && this.actualThrottle > 0.05) separating.push(b.stage);
+    }
+    if (separating.length > 0) {
+      this.sepExposure += dt;
+      if (this.sepExposure > 0.5) {
+        for (const s of separating) {
+          if (this.engineFailed.has(s)) continue;
+          this.engineFailed.add(s);
+          const lim = burns.find((b) => b.stage === s)!.maxAmb;
+          this.events.push({
+            type: 'engineDestroyed',
+            t: this.state.t,
+            stage: s,
+            reason: `nozzle flow separation — ambient ${(p / 1000).toFixed(1)} kPa, limit ${(lim / 1000).toFixed(1)} kPa`,
+          });
+        }
+      }
+    } else {
+      this.sepExposure = Math.max(0, this.sepExposure - dt);
+    }
+    const trigger = this.pools[this.stageIndex] ?? 0;
+    if (hadTrigger && trigger <= 0) {
+      this.events.push({ type: 'stageBurnout', t: this.state.t, stage: this.stageIndex });
+    }
+    this.propellant = trigger;
+    return { thrust, mdot, drained };
+  }
+
+  /** Boiloff (per-fluid scalar over mission time — deliberately not a
+   * thermal model) and ullage/settling bookkeeping, every step. */
+  private coastKeeping(dt: number, underThrust: boolean): void {
+    const vPools = this.vehicle.pools;
+    if (vPools) {
+      for (let i = this.stageIndex; i < this.pools.length; i++) {
+        const rate = propellantById(vPools[i]!.fluid).boiloffPerDay;
+        if (rate > 0 && (this.pools[i] ?? 0) > 0) {
+          const lost = this.pools[i]! * rate * (dt / 86_400);
+          this.pools[i] = this.pools[i]! - lost;
+          this.state.m -= lost;
+        }
+      }
+      this.propellant = this.pools[this.stageIndex] ?? 0;
+    }
+    if (this.landed || underThrust) {
+      this.unsettledTime = 0;
+      this.rcsSettleTime = 0;
+    } else {
+      this.unsettledTime += dt;
+      if (this.rcsSettle && (this.vehicle.rcsThrust ?? 0) > 0 && this.rcsPropellant > 0) {
+        this.rcsSettleTime += dt;
+        // ṁ = F/(g₀·Isp), Isp ≈ 300 s storable-RCS class (estimate).
+        const drain = ((this.vehicle.rcsThrust ?? 0) / (G0 * 300)) * dt;
+        this.rcsPropellant = Math.max(0, this.rcsPropellant - drain);
+        if (this.rcsSettleTime >= RCS_SETTLE_TIME) this.unsettledTime = 0;
+      } else {
+        this.rcsSettleTime = 0;
+      }
+    }
+  }
+
   /** Surface regime: burn propellant, spool engines, release on TWR > 1. */
   private stepSurface(dt: number): number {
-    const stage = this.vehicle.stages[this.stageIndex];
     const p = this.body.atmosphere?.pressure(Math.max(0, this.altitude)) ?? 0;
     const cmd = this.commandedThrottle();
     this.actualThrottle += ((cmd - this.actualThrottle) / SPOOL_TAU) * dt;
@@ -491,14 +787,9 @@ export class Sim {
     // sharply on valve closure rather than decaying forever, so cut the
     // exponential tail once it falls below 1% of rated thrust.
     if (this.actualThrottle < 0.01 && cmd === 0) this.actualThrottle = 0;
-    let mdot = 0;
-    let thrust = 0;
-    if (stage && this.actualThrottle > 0 && this.propellant > 0) {
-      mdot = stageMassFlow(stage) * this.actualThrottle;
-      thrust = stageThrustAtPressure(stage, p) * this.actualThrottle;
-    }
-    this.state.m -= mdot * dt;
-    this.propellant = Math.max(0, this.propellant - mdot * dt);
+    const { thrust, drained } = this.applyBurns(dt, p);
+    this.state.m -= drained;
+    this.coastKeeping(dt, this.actualThrottle > 0.05);
     this.state.t += dt;
     this.q = 0;
     this.mach = 0;
@@ -530,30 +821,69 @@ export class Sim {
 
     let mdot = 0;
     let thrust = 0;
-    if (stage && this.actualThrottle > 0 && this.propellant > 0) {
-      mdot = stageMassFlow(stage) * this.actualThrottle;
-      thrust = stageThrustAtPressure(stage, p) * this.actualThrottle;
-      if (mdot > 0) dt = Math.min(dt, Math.max(this.propellant / mdot, 1e-4));
+    if (stage && this.actualThrottle > 0 && this.drainableMass() > 0) {
+      // Probe burn rates (no drain yet) for the RK4 inputs and dt clamp.
+      for (const b of this.groupBurns(p)) {
+        if ((this.pools[b.pool] ?? 0) <= 0) continue;
+        thrust += b.thrust * this.actualThrottle;
+        mdot += b.mdot * this.actualThrottle;
+      }
+      if (mdot > 0) dt = Math.min(dt, Math.max(this.drainableMass() / mdot, 1e-4));
     }
 
     const props = this.massProps;
     const lever = props.yCoM - this.attachedBottomY();
 
-    // Attitude control: PD → gimbal + RCS.
+    // Attitude control, allocated by regime cost: gimbal (free with
+    // thrust) → active fins (free with q) → CMG wheels (free until
+    // saturated) → RCS (spends propellant). Each is non-dominated in
+    // its own regime.
     const err = wrapPi(this.targetAngle() - this.state.theta);
     const wantTorque = (KP * err - KD * this.state.omega) * props.inertia;
     let gimbalTorque = 0;
-    if (thrust > 1 && lever > 0.1) {
+    const gimbalMax =
+      stage && stage.engines.length > 0
+        ? (Math.max(...stage.engines.map((g) => g.engine.gimbalDeg)) * Math.PI) / 180
+        : GIMBAL_MAX;
+    if (thrust > 1 && lever > 0.1 && gimbalMax > 0) {
       const s = Math.max(-1, Math.min(1, -wantTorque / (thrust * lever)));
-      this.gimbal = Math.max(-GIMBAL_MAX, Math.min(GIMBAL_MAX, Math.asin(s)));
+      this.gimbal = Math.max(-gimbalMax, Math.min(gimbalMax, Math.asin(s)));
       gimbalTorque = -thrust * lever * Math.sin(this.gimbal);
     } else {
       this.gimbal = 0;
     }
+    let residual = wantTorque - gimbalTorque;
+    // Active fins: authority scales with dynamic pressure (previous step's
+    // q — one frame of lag is far inside the PD's bandwidth).
+    const finMax = (this.vehicle.finControlPerQ ?? 0) * this.q;
+    const finTorque = Math.max(-finMax, Math.min(finMax, residual));
+    residual -= finTorque;
+    // CMG wheels: free torque until the momentum store saturates.
+    const wheelMax = Math.abs(this.wheelMomentum) < (this.vehicle.wheelCapacity ?? 0) ? (this.vehicle.wheelTorque ?? 0) : 0;
+    const wheelTorque = Math.max(-wheelMax, Math.min(wheelMax, residual));
+    this.wheelMomentum += wheelTorque * dt;
+    residual -= wheelTorque;
+    // RCS last: spends the service budget (legacy pods without a budget
+    // keep the old free-torque behavior).
     const rcsMax = this.vehicle.rcsTorque ?? 0;
-    const controlTorque = gimbalTorque + Math.max(-rcsMax, Math.min(rcsMax, wantTorque - gimbalTorque));
+    const rcsAvail = this.vehicle.rcsPropellant === undefined || this.rcsPropellant > 0;
+    const rcsTorqueUsed = rcsAvail ? Math.max(-rcsMax, Math.min(rcsMax, residual)) : 0;
+    if (this.vehicle.rcsPropellant !== undefined && rcsMax > 0) {
+      // Duty-cycle drain: full-torque RCS ≈ a Draco couple at Isp 300.
+      this.rcsPropellant = Math.max(
+        0,
+        this.rcsPropellant - (Math.abs(rcsTorqueUsed) / rcsMax) * (((this.vehicle.rcsThrust ?? 800) / (G0 * 300)) * 0.5) * dt,
+      );
+    }
+    const controlTorque = gimbalTorque + finTorque + wheelTorque + rcsTorqueUsed;
 
-    const cdA0 = this.vehicle.cd * this.vehicle.area;
+    // Per-stage drag: the front shape changes as stages drop and when
+    // the fairing goes.
+    const drag = this.vehicle.drag;
+    const di = Math.min(this.stageIndex, (drag?.cdFaired.length ?? 1) - 1);
+    const cdEff = drag ? (this.fairingsJettisoned ? drag.cdBare[di]! : drag.cdFaired[di]!) : this.vehicle.cd;
+    const areaEff = drag ? (this.fairingsJettisoned ? drag.areaBare[di]! : drag.areaFaired[di]!) : this.vehicle.area;
+    const cdA0 = cdEff * areaEff;
     const refA = this.geom.refArea;
     const rotRate = this.body.rotationRate;
     const mu = this.body.mu;
@@ -620,12 +950,9 @@ export class Sim {
     this.aoa = speed > 1 ? Math.atan2(cross(air, this.bodyAxis), dot(air, this.bodyAxis)) : 0;
     this.checkStructure();
 
-    if (mdot > 0) {
-      this.propellant = Math.max(0, this.propellant - mdot * dt);
-      if (this.propellant === 0) {
-        this.events.push({ type: 'stageBurnout', t: this.state.t, stage: this.stageIndex });
-      }
-    }
+    // Pool drains (RK4's dm already took the mass), boiloff, settling.
+    this.applyBurns(dt, p);
+    this.coastKeeping(dt, this.actualThrottle > 0.05 && thrust / this.state.m > 0.5);
     this.checkContact();
     this.checkOrbit();
     // Powered steps are ≤ 50 ms, so an SOI boundary crossed mid-step is

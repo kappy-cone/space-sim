@@ -56,6 +56,13 @@ describe('engine pressure model', () => {
     vacuumOnly: false,
     minThrottle: 0.4,
     ignitions: Infinity,
+    propellant: 'kerolox',
+    source: 'synthetic test engine (round numbers)',
+    throttleable: true,
+    gimbalDeg: 5,
+    expansionRatio: 16,
+    maxAmbientPressure: Infinity,
+    ullageImmune: false,
   };
 
   it('thrust interpolates linearly: endpoints exact', () => {

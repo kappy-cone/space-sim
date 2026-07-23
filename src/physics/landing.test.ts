@@ -52,6 +52,9 @@ function lander(footprint = 2.2): { vehicle: Vehicle; geom: VehicleGeometry } {
     area: Math.PI * 0.36,
     geometry: geom,
     rcsTorque: 100,
+    // Ullage support for the terminal relight in the two-burn profile.
+    rcsThrust: 400,
+    rcsPropellant: 60,
   };
   return { vehicle, geom };
 }
