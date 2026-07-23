@@ -27,7 +27,7 @@ const FIGHTER_MAX_G = 6;
 /** Seeker/launch envelope: max range [m] and half-cone off boresight. */
 const LAUNCH_RANGE = 9_000; // WVR class
 const SEEKER_HALF_CONE = (45 * Math.PI) / 180;
-const RELOAD_TIME = 8; // s between shots off a rail — ESTIMATE
+const RELOAD_TIME = 3; // s between salvo shots off the rails — ESTIMATE
 /** Evade when an incoming missile is within this range and closing. */
 const THREAT_RANGE = 4_500;
 
@@ -126,78 +126,96 @@ export interface DogfightOptions {
 }
 
 /**
- * Run a 3-v-3 (or N-v-N) engagement to elimination or the time limit.
- * Team A spawns west heading east, Team B east heading west, with
- * seeded lateral offsets. Returns the full event timeline and outcome.
+ * A steppable 3-v-3 (or N-v-N) engagement. Team A spawns west heading
+ * east, Team B east heading west, with seeded lateral offsets. The
+ * physics step is a fixed dt so a given seed always plays out
+ * identically; the real-time 3-D view (ui/dogfight3d.ts) drives it in
+ * fixed substeps, the headless `simulateDogfight` runs it to the end —
+ * both get the same outcome.
  */
-export function simulateDogfight(opts: DogfightOptions = {}): DogfightResult {
-  const rnd = mulberry32(opts.seed ?? 1);
-  const dt = opts.dt ?? 0.05;
-  const maxTime = opts.maxTime ?? 120;
-  // One missile per fighter: the Air Launcher carries a single release
-  // pylon, so a flight's ordnance IS its aircraft count. A single
-  // merge-and-volley engagement is the honest result of that loadout.
-  const perF = opts.missilesPerFighter ?? 1;
-  const nA = opts.names?.A ?? ['Alpha 1', 'Alpha 2', 'Alpha 3'];
-  const nB = opts.names?.B ?? ['Bravo 1', 'Bravo 2', 'Bravo 3'];
-  const n = Math.min(nA.length, nB.length);
+export class Dogfight {
+  readonly fighters: Fighter[] = [];
+  readonly missiles: Missile[] = [];
+  readonly events: CombatEvent[] = [];
+  t = 0;
+  done = false;
+  winner: Team | 'draw' = 'draw';
+  shots = 0;
+  hits = 0;
+  readonly loadout: number;
+  private readonly dt: number;
+  private readonly maxTime: number;
+  private mid = 0;
+  private lastAction = 0;
 
-  const fighters: Fighter[] = [];
-  const spread = 4_000; // m of lateral separation between wingmen
-  // Start near the merge (~18 km apart) so the engagement is a turning
-  // fight, not a 60 km cruise-in. Lateral offsets are drawn INDEPENDENTLY
-  // per side (not mirrored) so the geometry — and thus the outcome — is
-  // genuinely asymmetric rather than a guaranteed mutual kill.
-  const lr = (): number => LAUNCH_RANGE * (0.45 + 0.5 * rnd());
-  for (let i = 0; i < n; i++) {
-    const base = (i - (n - 1) / 2) * spread;
-    fighters.push({
-      id: `A${i}`, team: 'A', name: nA[i]!,
-      pos: vec(-9_000, base + (rnd() - 0.5) * 4_000),
-      vel: vec(FIGHTER_SPEED, 0), alive: true, missiles: perF, cooldown: 0, launchRange: lr(),
-    });
-    fighters.push({
-      id: `B${i}`, team: 'B', name: nB[i]!,
-      pos: vec(9_000, base + (rnd() - 0.5) * 4_000),
-      vel: vec(-FIGHTER_SPEED, 0), alive: true, missiles: perF, cooldown: 0, launchRange: lr(),
-    });
+  constructor(opts: DogfightOptions = {}) {
+    const rnd = mulberry32(opts.seed ?? 1);
+    this.dt = opts.dt ?? 0.05;
+    this.maxTime = opts.maxTime ?? 180;
+    // Four missiles per fighter — two per wing bay (a full rail loadout).
+    this.loadout = opts.missilesPerFighter ?? 4;
+    const nA = opts.names?.A ?? ['Alpha 1', 'Alpha 2', 'Alpha 3'];
+    const nB = opts.names?.B ?? ['Bravo 1', 'Bravo 2', 'Bravo 3'];
+    const n = Math.min(nA.length, nB.length);
+    const spread = 4_000; // m of lateral separation between wingmen
+    // Start near the merge (~18 km apart) so it's a turning fight, not a
+    // 60 km cruise-in. Offsets are drawn INDEPENDENTLY per side (not
+    // mirrored) so the geometry — and outcome — is genuinely asymmetric.
+    const lr = (): number => LAUNCH_RANGE * (0.45 + 0.5 * rnd());
+    for (let i = 0; i < n; i++) {
+      const base = (i - (n - 1) / 2) * spread;
+      this.fighters.push({
+        id: `A${i}`, team: 'A', name: nA[i]!,
+        pos: vec(-9_000, base + (rnd() - 0.5) * 4_000),
+        vel: vec(FIGHTER_SPEED, 0), alive: true, missiles: this.loadout, cooldown: 0, launchRange: lr(),
+      });
+      this.fighters.push({
+        id: `B${i}`, team: 'B', name: nB[i]!,
+        pos: vec(9_000, base + (rnd() - 0.5) * 4_000),
+        vel: vec(-FIGHTER_SPEED, 0), alive: true, missiles: this.loadout, cooldown: 0, launchRange: lr(),
+      });
+    }
   }
 
-  const missiles: Missile[] = [];
-  const events: CombatEvent[] = [];
-  let mid = 0;
-  let shots = 0;
-  let hits = 0;
-  const living = (team: Team): Fighter[] => fighters.filter((f) => f.alive && f.team === team);
-  const byId = (id: string): Fighter | undefined => fighters.find((f) => f.id === id);
+  living(team: Team): Fighter[] {
+    return this.fighters.filter((f) => f.alive && f.team === team);
+  }
+  private byId(id: string): Fighter | undefined {
+    return this.fighters.find((f) => f.id === id);
+  }
 
-  let t = 0;
-  let lastAction = 0; // time of the last fire/kill — for the stalemate cut
-  for (; t <= maxTime; t += dt) {
-    if (living('A').length === 0 || living('B').length === 0) break;
-    // Ordnance expended and none in flight: the outcome is fixed — no
-    // gun in this model, so unarmed survivors can't trade further.
-    if (fighters.every((f) => !f.alive || f.missiles === 0) && missiles.every((m) => !m.alive)) break;
-    // Stalemate: equal-energy survivors that never gain a firing solution
-    // circle forever. With nothing in the air and no shot for a while,
-    // call it — the engagement is resolved on numbers.
-    if (t - lastAction > 35 && missiles.every((m) => !m.alive)) break;
+  /** Advance one fixed physics step (no-op once the engagement ends). */
+  step(): void {
+    if (this.done) return;
+    const { dt, missiles, events } = this;
+    const t = this.t;
+    if (
+      t > this.maxTime ||
+      this.living('A').length === 0 ||
+      this.living('B').length === 0 ||
+      // Ordnance expended and none in flight — no gun, so it's decided.
+      (this.fighters.every((f) => !f.alive || f.missiles === 0) && missiles.every((m) => !m.alive)) ||
+      // Stalemate: equal-energy survivors that never gain a firing
+      // solution circle forever; with nothing in the air, call it.
+      (t - this.lastAction > 35 && missiles.every((m) => !m.alive))
+    ) {
+      this.finish();
+      return;
+    }
 
     // ---- aircraft: pick target, evade incoming, else pursue + fire ----
-    for (const f of fighters) {
+    for (const f of this.fighters) {
       if (!f.alive) continue;
       f.cooldown = Math.max(0, f.cooldown - dt);
-      const foes = living(other(f.team));
+      const foes = this.living(other(f.team));
       if (foes.length === 0) continue;
 
-      // Nearest incoming missile that is closing on us within threat range.
       let threat: Missile | null = null;
       let threatRange = THREAT_RANGE;
       for (const m of missiles) {
         if (!m.alive || m.team === f.team || m.target !== f.id) continue;
         const rel = sub(f.pos, m.pos); // missile → fighter
         const rng = norm(rel);
-        // Closing when d/dt|rel| < 0, i.e. rel·(v_fighter − v_missile) < 0.
         if (rng < threatRange && dot(rel, sub(f.vel, m.vel)) < 0) {
           threat = m;
           threatRange = rng;
@@ -208,16 +226,13 @@ export function simulateDogfight(opts: DogfightOptions = {}): DogfightResult {
       const wRate = turnRate(FIGHTER_MAX_G, speed);
       let desired: Vec2;
       if (threat) {
-        // Beam/break: turn to put the missile on the 3/9 line — velocity
-        // perpendicular to the threat LOS bleeds its closing rate and
-        // forces a high-line-of-sight-rate endgame it may not out-turn.
         const los = sub(f.pos, threat.pos);
         const b1 = perp(los);
         const b2 = scale(b1, -1);
         desired = dot(b1, f.vel) >= dot(b2, f.vel) ? b1 : b2;
         if (f.evadingFrom !== threat.id) {
-          f.evadingFrom = threat.id; // one 'break' log per incoming missile
-          events.push({ t, type: 'evade', by: f.name, from: byMissileShooter(threat) });
+          f.evadingFrom = threat.id;
+          events.push({ t, type: 'evade', by: f.name, from: threat.shooter });
         }
       } else {
         f.evadingFrom = undefined;
@@ -227,7 +242,6 @@ export function simulateDogfight(opts: DogfightOptions = {}): DogfightResult {
       f.vel = turnToward(f.vel, desired, wRate * dt);
       f.pos = add(f.pos, scale(f.vel, dt));
 
-      // Fire: not evading, foe in the seeker cone and within range.
       if (!threat && f.missiles > 0 && f.cooldown <= 0) {
         const tgt = nearest(f, foes);
         const los = sub(tgt.pos, f.pos);
@@ -235,15 +249,15 @@ export function simulateDogfight(opts: DogfightOptions = {}): DogfightResult {
         const off = Math.acos(Math.max(-1, Math.min(1, dot(los, f.vel) / (rng * norm(f.vel) || 1))));
         if (rng <= f.launchRange && off <= SEEKER_HALF_CONE) {
           missiles.push({
-            id: `m${mid++}`, team: f.team, shooter: f.name,
+            id: `m${this.mid++}`, team: f.team, shooter: f.name,
             pos: { ...f.pos }, vel: { ...f.vel }, mass: MSL_LAUNCH_MASS,
             t0: t, target: tgt.id, alive: true,
           });
           f.missiles -= 1;
           f.cooldown = RELOAD_TIME;
-          shots += 1;
+          this.shots += 1;
           events.push({ t, type: 'fire', by: f.name, at: tgt.name, range: rng });
-          lastAction = t;
+          this.lastAction = t;
         }
       }
     }
@@ -251,37 +265,31 @@ export function simulateDogfight(opts: DogfightOptions = {}): DogfightResult {
     // ---- missiles: PN homing, rocket boost + drag, lethality ----
     for (const m of missiles) {
       if (!m.alive) continue;
-      const tgt = byId(m.target);
+      const tgt = this.byId(m.target);
       if (!tgt || !tgt.alive) {
         m.alive = false;
-        events.push({ t, type: 'miss', missile: m.id, target: byId(m.target)?.name ?? m.target, reason: 'target already down' });
+        events.push({ t, type: 'miss', missile: m.id, target: this.byId(m.target)?.name ?? m.target, reason: 'target already down' });
         continue;
       }
-      // Speed update: thrust (while grain remains) − drag, along vel.
       let speed = norm(m.vel);
       const burning = t - m.t0 < MSL_BURN;
-      if (burning) {
-        m.mass = Math.max(MSL_LAUNCH_MASS - MSL_GRAIN, m.mass - MSL_MDOT * dt);
-      }
+      if (burning) m.mass = Math.max(MSL_LAUNCH_MASS - MSL_GRAIN, m.mass - MSL_MDOT * dt);
       const thrust = burning ? MSL_THRUST : 0;
       const drag = 0.5 * RHO_COMBAT * speed * speed * MSL_CD * MSL_AREA;
       speed = Math.max(0, speed + ((thrust - drag) / m.mass) * dt);
-      // Heading update: proportional navigation, clamped to the airframe
-      // lateral-g limit (ω = a_max/V = MSL_MAX_G·g/V).
       const maxTurn = (MSL_MAX_G * G0) / Math.max(speed, 1);
       const dir = norm(m.vel) > 1e-6 ? scale(m.vel, 1 / norm(m.vel)) : vec(1, 0);
       const steered = steerByProNav(m.pos, scale(dir, speed), tgt.pos, tgt.vel, dt, maxTurn);
       m.vel = norm(steered) > 1e-6 ? scale(steered, speed / norm(steered)) : scale(dir, speed);
       m.pos = add(m.pos, scale(m.vel, dt));
 
-      // Terminal check: closest approach within this step vs lethal radius.
       const miss = segmentMiss(m.pos, sub(m.pos, scale(m.vel, dt)), tgt.pos, sub(tgt.pos, scale(tgt.vel, dt)));
       if (miss <= LETHAL_RADIUS) {
         m.alive = false;
         tgt.alive = false;
-        hits += 1;
-        events.push({ t, type: 'kill', missile: m.id, target: tgt.name, by: byMissileShooter(m) });
-        lastAction = t;
+        this.hits += 1;
+        events.push({ t, type: 'kill', missile: m.id, target: tgt.name, by: m.shooter });
+        this.lastAction = t;
         continue;
       }
       if (t - m.t0 > MSL_MAX_FLIGHT) {
@@ -292,23 +300,47 @@ export function simulateDogfight(opts: DogfightOptions = {}): DogfightResult {
         events.push({ t, type: 'miss', missile: m.id, target: tgt.name, reason: 'energy depleted' });
       }
     }
+    this.t += dt;
   }
 
-  const a = living('A').length;
-  const b = living('B').length;
-  const winner: Team | 'draw' = a > b ? 'A' : b > a ? 'B' : 'draw';
-  events.push({ t, type: 'end', winner, survivorsA: a, survivorsB: b });
-  return {
-    events,
-    winner,
-    survivors: { A: living('A'), B: living('B') },
-    duration: t,
-    shots,
-    hits,
-  };
+  /** Advance by real wall-clock seconds at a time scale, in fixed
+   * substeps — deterministic regardless of frame rate. */
+  advance(realSeconds: number, timeScale = 1): void {
+    let acc = realSeconds * timeScale;
+    let guard = 0;
+    while (acc >= this.dt && !this.done && guard++ < 20_000) {
+      this.step();
+      acc -= this.dt;
+    }
+  }
+
+  private finish(): void {
+    if (this.done) return;
+    const a = this.living('A').length;
+    const b = this.living('B').length;
+    this.winner = a > b ? 'A' : b > a ? 'B' : 'draw';
+    this.events.push({ t: this.t, type: 'end', winner: this.winner, survivorsA: a, survivorsB: b });
+    this.done = true;
+  }
+
+  result(): DogfightResult {
+    return {
+      events: this.events,
+      winner: this.winner,
+      survivors: { A: this.living('A'), B: this.living('B') },
+      duration: this.t,
+      shots: this.shots,
+      hits: this.hits,
+    };
+  }
 }
 
-const byMissileShooter = (m: Missile): string => m.shooter;
+/** Run an engagement to completion (headless — tests, reports). */
+export function simulateDogfight(opts: DogfightOptions = {}): DogfightResult {
+  const df = new Dogfight(opts);
+  while (!df.done) df.step();
+  return df.result();
+}
 
 function nearest(f: Fighter, foes: Fighter[]): Fighter {
   let best = foes[0]!;

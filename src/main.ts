@@ -9,6 +9,7 @@
 import { Compiled } from './craft/compile';
 import { Craft } from './craft/craft';
 import { Flight3D, LaunchContext } from './ui/flight3d';
+import { Dogfight3D } from './ui/dogfight3d';
 import { Vab } from './ui/vab';
 import {
   WORLD_STORAGE_KEY,
@@ -45,12 +46,17 @@ let current: { destroy(): void } | null = null;
 
 function showVab(): void {
   current?.destroy();
-  current = new Vab(app, showFlight, world, saveWorld);
+  current = new Vab(app, showFlight, world, saveWorld, showDogfight);
 }
 
 function showFlight(compiled: Compiled, craft: Craft, launch: LaunchContext): void {
   current?.destroy();
   current = new Flight3D(app, compiled, craft, 250_000, showVab, launch);
+}
+
+function showDogfight(): void {
+  current?.destroy();
+  current = new Dogfight3D(app, showVab);
 }
 
 showVab();
