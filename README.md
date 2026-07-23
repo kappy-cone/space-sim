@@ -19,15 +19,22 @@ pipeline (no float32 wobble at planetary distances).
 
 **3-DOF planar simulation**: state [x, y, θ, vx, vy, ω] in the orbital
 plane of a **named reference body** ([bodies.ts](src/physics/bodies.ts) — a
-data-driven table with μ, radius, SOI, parent; one row today, moon-ready
-via patched conics later). Every constant carries its source.
+data-driven table with μ, radius, SOI, parent, circular coplanar
+ephemeris). **Patched-conic SOI transitions**: inside a body's sphere of
+influence only that body's gravity applies; crossing the boundary
+(bisected to 1 ms on rails, checked every powered step) re-references the
+state vector to the new primary and continues on a new conic — never
+n-body. Every constant carries its source.
 
 - **Constants/atmosphere**: IERS μ⊕, WGS-84 radius/rotation, g₀ (CGPM,
   Isp only — never local gravity), USSA76 density (Vallado Table 8-4) and
   barometric pressure layers.
 - **Engines** ([parts.ts](src/physics/parts.ts)): real Merlin 1D/MVac,
   RS-25, Raptor 2, RL10B-2, Rutherford; ṁ = F_vac/(g₀·Isp_vac); thrust
-  linear in ambient pressure; first-order spool-up (τ = 0.4 s).
+  linear in ambient pressure; first-order spool-up (τ = 0.4 s);
+  **min-throttle floors and ignition budgets** (cited where published,
+  flagged estimates where not — RS-25 is ground-lit only, a Rutherford
+  stage gets two lights and the denial names the limit).
 - **Attitude dynamics** ([sim.ts](src/physics/sim.ts)): thrust along the
   body axis; ±5° gimbal driven by a PD controller; aerodynamic normal
   force at the Barrowman CoP (restoring when CoP is aft of CoM, flipping
@@ -43,7 +50,7 @@ via patched conics later). Every constant carries its source.
 - **Trajectory**: fixed-step RK4 powered/atmospheric; universal-variable
   Kepler for every coast (never integrated — exact at any warp).
 
-### Validation (46 tests)
+### Validation (60 tests)
 
 Tsiolkovsky to 1e-9 · energy/momentum over 1000 Kepler orbits · Hohmann vs
 closed form · terminal velocity · RK4 drift < 1e-10/orbit · Kepler round
@@ -55,7 +62,14 @@ determinism (bit-identical reruns) · RK4 4th-order convergence · the
 RK4↔Kepler seam · exact Δv loss accounting (ideal − gravity − aero −
 steering = actual, each term in its published range) · the suicide-burn
 predictor lands the burn it recommends · chute safe-q envelope · named
-touchdown-limit failures and tipping vs the leg footprint.
+touchdown-limit failures and tipping vs the leg footprint · **SOI
+cross-validation** (a translunar coast is continuous in position/velocity
+at both handoffs, conserves energy within each two-body frame, yields a
+real gravity assist, and can't tunnel the boundary at any step size) ·
+an airless-moon suicide burn and a translated descent that must null its
+drift · engine floors and ignition budgets · **golden trajectories**
+(full ascent/landing state series pinned to fixtures; regenerate
+deliberately with `GOLDEN_REGEN=1`).
 
 ## The game
 
@@ -104,9 +118,18 @@ Auto-land executes exactly the burn the predictor recommends.
 
 The atmosphere now carries its stages both ways: USSA76 temperature →
 speed of sound → a transonic Cd(Mach) drag-rise curve in the physics, and
-altitude-staged sky color, haze shells, plume expansion, and Mach/q
-readouts on the surface. Terrain is visual (landmass-colored rotating
-globe); collision stays the smooth sphere per the landing brief. The moon
-sits in the body table with real ephemeris (rendered in the sky, SOI
-precomputed) as scaffolding for patched conics — transitions are the next
-pass.
+altitude-staged sky color, haze shells, plume expansion, airflow streaks,
+a √ρ·v³-gated compression glow, and Mach/q readouts on the surface.
+Terrain is visual (landmass-colored rotating globe + a depth-stable local
+ground cap); collision stays the smooth sphere per the landing brief.
+
+## The moon
+
+The moon rides its real circular ephemeris and is a first-class
+destination: cross its 66,200 km Laplace SOI and the HUD re-references to
+"Ref body: Moon", the orbit line turns moon-relative (hyperbolic arcs
+included), the trail converts frame, and the grey regolith globe becomes
+the ground you land on — no atmosphere, so descent is a pure suicide
+burn under the same four named touchdown limits. 10,000× warp covers the
+~5-day transfer; staging (space) walks separations first, then
+deployables, KSP-style.

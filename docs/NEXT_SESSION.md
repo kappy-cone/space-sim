@@ -1,8 +1,8 @@
 # Handoff notes for the next working session
 
-Written 2026-07-23 at the end of the landing/realism pass. Read this before
-touching code; it is the condensed context that isn't obvious from the
-source.
+Written 2026-07-23 at the end of the SOI/moon pass (the session after the
+landing/realism pass). Read this before touching code; it is the condensed
+context that isn't obvious from the source.
 
 ## Hard invariants (violating any of these is the main failure mode)
 
@@ -10,128 +10,129 @@ source.
   to it. Derived or estimated values are explicitly flagged as such. No
   invented numbers presented as data.
 - **g₀ = 9.80665 is for Isp↔ṁ conversion only.** Local gravity is always
-  μ/r². This is the most common rocket-sim bug; the tests pin it.
+  μ/r². The tests pin it.
 - **Coasts are never integrated.** Vacuum + engines-off ⇒ universal-variable
-  Kepler (`kepler.ts`). A resting vehicle is never integrated either — it is
-  pinned to the rotating surface (`Sim.pinToSurface`). Only powered or
-  in-atmosphere flight goes through RK4.
-- **Physics stays planar 3-DOF** [x, y, θ, vx, vy, ω]. The user explicitly
-  froze 6-DOF out. The builder/flight views are 3D; the sim is not.
-- **Zero runtime dependencies.** Vite/Vitest/TypeScript are dev-only. If a
-  dependency does something achievable in ~50 lines, write the lines. If
-  something needs a heavy library, STOP and ask the user first.
-- **No audio.** It was built and removed at the user's request. Do not
-  re-add.
-- **Terrain is paint.** The landing brief froze terrain systems: collision
-  is the smooth sphere + flat pad. The landmass coloring in
-  `mesh.ts/terrainColor` is visual only.
+  Kepler (`kepler.ts`), now with patched-conic SOI handoffs inside
+  `Sim.stepRails`. A resting vehicle is pinned to the rotating surface.
+  Only powered or in-atmosphere flight goes through RK4. A stage that
+  cannot light (ignition budget spent) counts as a coast.
+- **Patched conics, never n-body.** Inside a body's SOI only that body's
+  gravity applies. Crossings bisect to 1 ms on rails (`railsSafeDt` makes
+  tunneling impossible at any step size) and re-reference the state
+  vector (`Sim.reReference`). `soi.test.ts` cross-validates continuity,
+  per-frame energy conservation, and the gravity assist.
+- **Physics stays planar 3-DOF** [x, y, θ, vx, vy, ω]. The user froze
+  6-DOF out. The moon is coplanar by design so 3-DOF holds.
+- **Zero runtime dependencies.** Vite/Vitest/TypeScript are dev-only. No
+  @types/node either — `src/node-builtins.d.ts` declares the few node
+  builtins the tests use.
+- **No audio.** Built and removed at the user's request. Do not re-add.
+- **Terrain is paint.** Collision is the smooth sphere + flat pad. The
+  landmass/regolith coloring and the local ground cap are visual only.
 - **Determinism.** No `Date.now()`/`Math.random()` in physics (`src/physics`,
-  `src/craft`). Rendering may use them (plume flicker, ring pulse). The
-  determinism test will catch violations.
-- **The surface is legible.** Every number a player needs is on screen; the
-  builder warns before launch. Failures name the limit exceeded and by how
-  much ("vertical speed 11.4 m/s, limit 6.0"), never just "crashed".
+  `src/craft`). Rendering may use them (plume flicker, streaks, glow).
+- **The surface is legible.** Failures name the limit exceeded and by how
+  much — touchdown limits, breakup q, ignition budgets all do this.
+- **Golden fixtures change only deliberately.** `golden.test.ts` pins full
+  ascent/landing state series at 1e-6 relative. A deliberate physics
+  change regenerates with `GOLDEN_REGEN=1 npx vitest run
+  src/physics/golden.test.ts` and the fixture diff gets reviewed in the
+  commit.
 
 ## Architecture map
 
 ```
 src/physics/    pure f64 physics, no DOM
-  bodies.ts       data-driven celestial bodies (Earth + Moon row); Laplace SOI
+  bodies.ts       body table (Earth + Moon) + bodyOrbitState ephemeris,
+                  childrenOf, Laplace SOI
   constants.ts    sourced constants
-  atmosphere.ts   USSA76 density/pressure/temperature, speed of sound, Cd(Mach)
+  atmosphere.ts   USSA76 density/pressure/temperature, Cd(Mach)
   vec2.ts         2D vector helpers
   integrator.ts   RK4 over [r, v, θ, ω, m]
   kepler.ts       universal-variable propagation + osculating elements
-  massmodel.ts    CoM/inertia/CoP (Barrowman) from part layout; legs/chutes info
-  vehicle.ts      stage aggregates (thrust, ṁ, Δv, TWR)
-  sim.ts          the three-regime flight sim (integrated / rails / surface)
-  autopilot.ts    gravity-turn ascent + circularization (test pilot + default)
-  landing.ts      suicide-burn landing autopilot (self-tests the predictor)
-  parts.ts        real engine roster (sourced) + tank line
-src/craft/      part catalog → craft tree → compiled vehicle
-  catalog.ts      part defs incl. geometry, fins/legs/chutes
-  craft.ts        tree, placements, splice-delete, starters, referenceCraft
-  compile.ts      craft → Vehicle + VehicleGeometry + warnings + stability
-src/gl/         hand-rolled WebGL2 (float64 camera-relative — do not regress
-                this; float32 transforms visibly wobble at planet scale)
+  massmodel.ts    CoM/inertia/CoP (Barrowman) from part layout
+  vehicle.ts      stage aggregates incl. stageMinThrottle/stageIgnitionLimit
+  sim.ts          three-regime sim + SOI transitions + engine limits
+  autopilot.ts    gravity-turn ascent + energy-cutoff circularization
+  landing.ts      suicide-burn autopilot with h-speed nulling tilt
+  parts.ts        engine roster incl. minThrottle/ignitions (sourced/flagged)
+src/craft/      catalog → craft tree → compiled vehicle
+src/gl/         hand-rolled WebGL2 (float64 camera-relative — do not regress;
+                also do not draw near-field geometry with a far-away model
+                origin: that's what caused the flashing-pad bug. Local
+                ground caps exist for exactly this.)
 src/ui/         vab.ts (builder), flight3d.ts (flight), format.ts
 ```
 
-`npm run dev` (port 5173), `npm test` (46 tests). `window.__vab` is a debug
-hook to the live VAB instance.
+`npm run dev` (port 5173, or PORT env), `npm test` (60 tests).
+`window.__vab` and `window.__flight` are debug hooks to the live views.
 
 ## localStorage keys
 
-`space-sim.craft` (current craft), `space-sim.craft.bak` (auto-backup when a
-save shrinks), `space-sim.craft.undo` (persisted undo tail),
-`space-sim.hangar` (named saves).
+`space-sim.craft` (current), `space-sim.craft.bak` (auto-backup when a save
+shrinks), `space-sim.craft.undo` (persisted undo tail), `space-sim.hangar`.
 
-## Not implemented yet (the backlog, roughly in order)
+## Done this session (was the backlog)
 
-1. **Patched-conic SOI transitions** — the moon exists in `bodies.ts` with
-   real ephemeris and is rendered in the sky, but gravity is still
-   single-body. Plan (user-specified): inside a body's SOI only that body's
-   gravity applies; crossing the boundary re-references the state vector to
-   the new primary and produces a new conic. Never n-body. Scaffolding:
-   `laplaceSoi`, `soiContains`, `CelestialBody.parent/orbit`. Sim needs: SOI
-   crossing detection during rails propagation (solve for boundary crossing
-   time), state re-reference, `Sim.body` becoming mutable, HUD/map showing
-   the active reference body, moon-relative orbit line. The moon is coplanar
-   by design so 3-DOF holds.
-2. **Moon landing support** — no atmosphere ⇒ pure suicide-burn; radar
-   altitude & touchdown adjudication already body-generic. Needs body-aware
-   pad/terrain visuals (grey terrainColor variant) and the flight view's
-   hardcoded Earth assumptions audited (`toWorld` pad math is generic;
-   check sky color, shells, terrain guarded by `body.atmosphere`).
-3. **Landing autopilot horizontal-speed nulling / boostback** — current
-   auto-land only manages vertical speed; a translated descent can fail the
-   h-speed limit. Fine for drop tests, insufficient for booster return.
-4. **Chutes/legs in the staging sequence** — currently manual (P/G keys).
-   KSP-style: deployables as staging entries.
-5. **Radial part re-parenting** — stack parts can be picked up and moved;
-   radial parts only slide on their current parent.
-6. **Golden trajectory tests** — record full ascent/landing state series,
-   assert within tolerance, regenerate deliberately (user's footnote).
-7. **Engine realism extras** — per-engine min-throttle (Merlin ~40%),
-   relight limits, ullage. Estimates must be flagged.
-8. **OpenRocket CoP cross-check** — build an equivalent vehicle in
-   OpenRocket and compare static margins (external validation, user
-   suggested).
-9. **Nicer Earth** — clouds, night side, specular ocean. Visual only.
+1. Patched-conic SOI transitions + cross-validation suite (`soi.test.ts`).
+2. Moon landing (airless suicide burn, tested; flight view body-generic:
+   per-body terrain spheres/caps, black sky, pad only on Earth,
+   moon-relative orbit line incl. hyperbolic arcs, trail frame conversion,
+   Ref-body HUD row, 10,000× warp).
+3. Landing autopilot h-speed nulling (tilt against drift, tested at 25 m/s).
+4. Deployables in the staging sequence (flight-side queue; VAB shows the
+   tail; entries consumed implicitly by autopilot/manual actions).
+5. Radial re-parenting (drag off the surface → pickup/ghost flow) + the
+   undo/redo rollback fix (cancelled gestures no longer eat redo history).
+6. Golden trajectory tests (`golden.test.ts` + fixtures).
+7. Per-engine min-throttle floors and ignition budgets (+ HUD readouts,
+   named ignition denial, `engines.test.ts`).
+8. Bug fixes: circularization Ap overshoot (energy cutoff + spool-tail
+   anticipation), HUD TWR at ambient pressure, spool-tail 1% snap,
+   landing-panel hysteresis, liftoff re-pin (23 m sideways snap), stale
+   ORBIT banner, flashing pad (polygonOffset + anchored ground cap),
+   landing-autopilot final phase now uses thrust-at-pressure.
+9. Descent feel: airflow streaks, √ρ·v³ compression glow, cap mottling.
 
-## Known bugs / rough edges to hunt
+## Not implemented yet (the new backlog, roughly in order)
 
-- **Ascent autopilot circularization overshoots Ap** when Δv margin is big
-  (finishes e.g. 544×258 km for a 250 km target). Cut the burn smarter
-  (bisect throttle near Pe target, or pitch slightly radial).
-- **HUD TWR uses vacuum thrust** (flight3d `updateHud`) — slightly wrong at
-  sea level; use `stageThrustAtPressure`.
-- **Spool tail shows "→ 1%" throttle** briefly after MECO; cosmetic.
-- **Redo stack is cleared by pickup-cancel** (`finishPickup` → `undo()`
-  pushes to redo, but a subsequent action clears it) — audit undo/redo
-  around drag flows.
+1. **Moon mission UX**: a maneuver-node-style transfer planner (even just
+   a "burn prograde at T-x for TLI" hint), and a moon-relative impact
+   predictor readout check. Landing on the moon works but finding it is
+   manual.
+2. **PEG-class ascent guidance** (linear tangent): the current
+   circularization is energy-cutoff prograde, which legitimately leaves
+   e ≈ 0.01 on lofted profiles (documented in sim.test.ts). Powered
+   explicit guidance would hit r/vr/h targets simultaneously.
+3. **Crash/wreck visuals**: a crashed vehicle currently keeps rendering
+   intact at its final state; landingFailed should at least tip/scatter.
+4. **OpenRocket CoP cross-check** (external validation, user suggested).
+5. **Nicer Earth**: clouds, night side, specular ocean. Visual only.
+6. **Ullage / propellant settling for relights** (flagged estimates), if
+   engine realism continues.
+
+## Known rough edges
+
 - **Staging reorder UI** allows physically silly orders (by design — the
   verdict shows consequences) but the labels don't warn.
-- **Landing panel flicker** possible near vSpeed ≈ 0 (display condition
-  `vSpeed > 0`); consider hysteresis.
-- **Leg visual vs physics**: splayed legs are visual; footprint comes from
-  `compile.ts` (50° splay assumption). Fine, but keep them consistent if
-  either changes.
-- **Impact predictor** ignores lift/attitude (point-mass + chutes); document
-  on screen if it misleads during high-AoA descents.
+- **Impact predictor** ignores lift/attitude (point-mass + chutes).
+- **Deep-throttle bang-bang**: engines with floors above hover thrust
+  (e.g. Rutherford on the moon) force pulsed final descents, which eat
+  ignition budget. That is real physics; the moon landing tests pass
+  within 2 lights, but a player hovering manually can strand themselves —
+  the denial event names it.
+- **The stability test rocket needs 8 large fins** — real physics (low
+  full-load CoM from settled propellant), see compile.test.ts comments.
 - **Phantom-input corruption** was seen ONLY under remote browser
-  automation (crafts resetting, spurious stagings) — never through real
-  input. Mitigations: `.bak` key, persisted undo, console warnings on
-  destructive ops. If a real user reports it, take it seriously; otherwise
-  don't chase ghosts.
-- The **stability test rocket needs 8 large fins** because full-load CoM
-  sits low (settled propellant). That is real physics, not a tuning bug —
-  see compile.test.ts comments before "fixing" it.
+  automation (this session: an in-app-browser scroll synthesized a page
+  key that launched the rocket). Never reproduced with real input; the
+  .bak key, persisted undo, and console warnings remain as mitigations.
 
-## Tuning knobs (all in one place for calibration work)
+## Tuning knobs
 
-`sim.ts`: PD gains KP=0.5/KD=1.4, GIMBAL_MAX 5°, SPOOL_TAU 0.4 s,
+`sim.ts`: KP=0.5/KD=1.4, GIMBAL_MAX 5°, SPOOL_TAU 0.4 s (exported),
 COAST_SLEW_RATE 5°/s, TOUCHDOWN_LIMITS. `landing.ts`: FINAL_DESCENT_SPEED
-2 m/s, burn margin 1.05, LEG_DEPLOY_ALT 2 km. `atmosphere.ts`:
-CD_MACH_TABLE. `compile.ts`: MAX_Q_* structural limits, LEO_BUDGET.
-`autopilot.ts`: pitch program exponent 0.4, ref speed 7800 m/s.
+2 m/s, burn margin 1.05, LEG_DEPLOY_ALT 2 km, h-null gain 0.7/s, tilt cap
+0.2 rad. `autopilot.ts`: pitch exponent 0.4, ref speed 7800 m/s, TAPER
+2.5 s, ignition at tBurn/2 before apo. `atmosphere.ts`: CD_MACH_TABLE.
+`compile.ts`: MAX_Q_* limits, LEO_BUDGET.
