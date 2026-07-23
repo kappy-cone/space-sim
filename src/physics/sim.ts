@@ -138,6 +138,22 @@ export class Sim {
   hasLanded = false; // made a successful landing after flight
   events: SimEvent[] = [];
   torn = new Set<string>();
+  /** State of each separated stage at the moment it was dropped —
+   * recorded ALWAYS (a few numbers per staging event), read only when a
+   * committed flight is harvested into the world registry. Test flights
+   * never read it, so recording is inert. */
+  readonly sepStates: {
+    r: Vec2;
+    v: Vec2;
+    t: number;
+    body: string;
+    /** Total separated mass [kg] (dry section + residual pool). */
+    mass: number;
+    /** Drag reference Cd·A [m²] of the dropped section (the vehicle's
+     * bare drag at that stage index — tumbling-stage class estimate). */
+    cdA: number;
+    stage: number;
+  }[] = [];
   /** Ignitions consumed per stage index (first light included). */
   readonly ignitionsUsed: number[] = [];
   private ignitionDenied = false;
@@ -214,13 +230,18 @@ export class Sim {
     /** Spawn mid-air at this state instead of pinned to a site — how a
      * released vessel is born (air launch). */
     seed?: { r: Vec2; v: Vec2; theta: number; omega: number; t: number },
+    /** Sim clock at flight start [s]. Committed flights launch at the
+     * world epoch so the moon phase and site rotation stay continuous
+     * across a program; test flights keep the default 0 (byte-identical
+     * to the pre-world sim — the golden fixtures pin it). */
+    startTime = 0,
   ) {
     this.vehicle = vehicle;
     this.body = body;
     this.site = site ?? defaultSite(!!vehicle.planeAero);
     if (this.site.body === body.id) this.restAngle0 = this.site.angle;
     this.geom = vehicle.geometry ?? synthesizeGeometry(vehicle.stages, vehicle.payloadMass);
-    this.state = { r: vec(0, 0), v: vec(0, 0), theta: 0, omega: 0, m: massFromStage(vehicle, 0), t: 0 };
+    this.state = { r: vec(0, 0), v: vec(0, 0), theta: 0, omega: 0, m: massFromStage(vehicle, 0), t: startTime };
     this.pools = vehicle.pools
       ? vehicle.pools.map((p) => p.mass)
       : vehicle.stages.map((s) => stagePropellant(s));
@@ -477,6 +498,19 @@ export class Sim {
     const dropped = this.vehicle.stages[this.stageIndex]!;
     const wasStrapOn = this.vehicle.strapOn?.[this.stageIndex] ?? false;
     const sepDry = this.vehicle.sepMass?.[this.stageIndex] ?? stageDryMass(dropped);
+    // Record the dropped section's state for the world registry (a drop:
+    // same position and velocity as the vehicle at separation).
+    const drag = this.vehicle.drag;
+    const di = Math.min(this.stageIndex, (drag?.cdBare.length ?? 1) - 1);
+    this.sepStates.push({
+      r: { ...this.state.r },
+      v: { ...this.state.v },
+      t: this.state.t,
+      body: this.body.id,
+      mass: sepDry + (this.pools[this.stageIndex] ?? this.propellant),
+      cdA: drag ? drag.cdBare[di]! * drag.areaBare[di]! : this.vehicle.cd * this.vehicle.area,
+      stage: this.stageIndex,
+    });
     this.state.m -= sepDry + (this.pools[this.stageIndex] ?? this.propellant);
     this.pools[this.stageIndex] = 0;
     this.events.push({ type: 'stageSeparation', t: this.state.t, stage: this.stageIndex });
