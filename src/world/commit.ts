@@ -27,9 +27,11 @@ import {
   activateSite,
   advanceWorld,
   applyWear,
+  checkSiteDiscoveries,
   orbitPersists,
   padWearSeconds,
   pushLog,
+  revealBins,
   runwayWearSeconds,
 } from './world';
 
@@ -82,6 +84,9 @@ export interface HarvestVessel {
    * leave the registry — deorbited with the tug or riding attached (the
    * mass is already inside the vessel's final state). */
   capturedIds?: string[];
+  /** Terrain bins overflown below the mapping ceiling during the flight
+   * — revealed at harvest (the flying-there discovery path). */
+  overflownBins?: Iterable<number>;
 }
 
 export interface HarvestResult {
@@ -221,5 +226,11 @@ export function harvestCommittedFlight(
       { type: 'deployed', t: s.state.t, id, name: v.name, func: v.func },
     );
   }
+  // Overflight reveal + any site discoveries it exposes.
+  for (const v of vessels) {
+    if (v.overflownBins) revealBins(w, v.overflownBins);
+  }
+  events.push(...checkSiteDiscoveries(w, tEnd));
+
   return { events, added, recovered };
 }

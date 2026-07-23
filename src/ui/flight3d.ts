@@ -34,7 +34,7 @@ import { planeStability } from '../physics/massmodel';
 import { SITES, Site, siteById, defaultSite } from '../physics/sites';
 import { Renderer } from '../gl/renderer';
 import { fmtDistance, fmtMass, fmtSpeed, fmtTime } from './format';
-import { SpaceObject, WorldState, objectStateAt, siteState } from '../world/world';
+import { OVERFLIGHT_ALT, SpaceObject, WorldState, binOf, objectStateAt, siteState } from '../world/world';
 import { ascentDirection, corridorViolated, harvestCommittedFlight } from '../world/commit';
 import { LinkResult, earthFrame, hasLink } from '../world/network';
 import { Approach, CAPTURE_RANGE, CAPTURE_SPEED, closestApproach } from '../world/rendezvous';
@@ -101,6 +101,9 @@ interface Vessel {
    * registry itself is untouched until the committed harvest — a test
    * flight grapples a simulated copy and writes nothing. */
   captured: string[];
+  /** Terrain bins overflown below the mapping ceiling (committed
+   * flights only — collected locally, written at harvest). */
+  overflown: Set<number>;
 }
 
 interface StagingEntry {
@@ -257,6 +260,7 @@ export class Flight3D {
       stagingEntries: this.stagingEntries,
       consumedEntries: this.consumedEntries,
       captured: [],
+      overflown: new Set(),
     });
     this.camera.minDist = 8;
     this.camera.maxDist = 6e7;
@@ -500,6 +504,7 @@ export class Flight3D {
           func: activeFunc(v.compiled, v.sim.stageIndex),
           releasedStages: v.compiled.released?.map((r) => r.sectionBurnIndex),
           capturedIds: v.captured,
+          overflownBins: v.overflown,
         })),
         {
           siteId: this.launch.siteId,
@@ -608,6 +613,7 @@ export class Flight3D {
       stagingEntries: buildStagingEntries(rel.sub),
       consumedEntries: new Set(),
       captured: [],
+      overflown: new Set(),
     });
     this.switchVessel(this.vessels.length - 1);
   }
@@ -770,6 +776,17 @@ export class Flight3D {
         for (const v of this.vessels) {
           if (v.sim.crashed) continue;
           v.sim.step(dt);
+          // Overflight mapping (committed flights): low flight over the
+          // Earth reveals the terrain beneath at harvest. Collected as
+          // bins locally — a test flight collects nothing.
+          if (
+            this.launch?.committed &&
+            v.sim.body.id === 'earth' &&
+            v.sim.altitude < OVERFLIGHT_ALT
+          ) {
+            const st = v.sim.state;
+            v.overflown.add(binOf(Math.atan2(st.r.y, st.r.x) - v.sim.body.rotationRate * st.t));
+          }
           if (v.sim.state.t - v.lastTrailT > 0.5) {
             v.lastTrailT = v.sim.state.t;
             v.trail.push({ x: v.sim.state.r.x, y: v.sim.state.r.y, t: v.sim.state.t });

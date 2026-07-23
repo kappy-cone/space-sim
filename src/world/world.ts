@@ -19,8 +19,9 @@
 // what reenters — physically correct, and the garbage collector that
 // keeps the registry bounded.
 
-import { bodyById } from '../physics/bodies';
-import { siteById } from '../physics/sites';
+import { EARTH, bodyById, bodyOrbitState } from '../physics/bodies';
+import { SITES, siteById } from '../physics/sites';
+import { hasLink } from './network';
 import { Elements, elementsFromState, propagateKepler } from '../physics/kepler';
 import { Vec2, vec } from '../physics/vec2';
 import { G0 } from '../physics/constants';
@@ -36,6 +37,16 @@ export const STATIONKEEPING_ISP = 300;
 /** Terrain reveal resolution: 1440 bins of 0.25° ≈ 27.8 km of arc at the
  * Earth's equator — commensurate with a site's footprint. */
 export const REVEAL_BINS = 1440;
+
+/** Imaging ceiling for survey satellites [m]: above this the take is
+ * useless (GSD scales with altitude; Landsat flies 705 km, SPOT 822 km
+ * — see the Survey Module part). This is what makes survey want a LOW
+ * orbit. */
+export const SURVEY_CEILING = 900_000;
+
+/** Aircraft overflight reveal ceiling [m]: low flight maps what it
+ * flies over (class value — visual/radar mapping altitude). */
+export const OVERFLIGHT_ALT = 10_000;
 
 export type ObjectKind = 'satellite' | 'debris' | 'vessel';
 export type SatelliteFunc = 'relay' | 'survey' | 'tug';
@@ -297,7 +308,58 @@ export function advanceWorld(w: WorldState, dt: number): WorldEvent[] {
   w.objects = survivors;
   w.epoch = t1;
   for (const ev of events) pushLog(w, ev);
+
+  // ---- survey reveal ----
+  // A survey satellite reveals the terrain directly beneath it while it
+  // is (a) under the imaging ceiling and (b) LINKED to the network —
+  // no onboard storage is modeled (simplification, flagged), which is
+  // exactly what couples survey coverage to the relay constellation:
+  // with only the Cape station, only the arc around the Cape ever gets
+  // imaged. Sampled at 60 s (a LEO ground track moves ~4°/min, well
+  // over the 0.25° bin size but continuous arcs are swept between
+  // consecutive linked samples).
+  const surveys = w.objects.filter((o) => o.func === 'survey' && o.body === 'earth');
+  if (surveys.length > 0 && dt > 0) {
+    const relays = w.objects.filter((o) => o.func === 'relay');
+    const relayPos = (t: number) =>
+      relays.map((o) => {
+        const s = objectStateAt(o, t);
+        const b = bodyById(o.body);
+        const off = b.parent && b.orbit ? bodyOrbitState(b, t).r : null;
+        return { pos: off ? { x: s.r.x + off.x, y: s.r.y + off.y } : s.r, name: o.name };
+      });
+    const wrapSigned = (x: number): number => ((x + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
+    const step = 60;
+    for (const o of surveys) {
+      let prevSigma: number | null = null;
+      for (let t = t1 - dt; t <= t1; t += step) {
+        const s = objectStateAt(o, t);
+        const rn = Math.hypot(s.r.x, s.r.y);
+        if (rn - EARTH.radius > SURVEY_CEILING || !hasLink(s.r, t, relayPos(t)).linked) {
+          prevSigma = null;
+          continue;
+        }
+        const sigma = Math.atan2(s.r.y, s.r.x) - EARTH.rotationRate * t;
+        if (prevSigma !== null) revealArc(w, prevSigma, wrapSigned(sigma - prevSigma));
+        prevSigma = sigma;
+      }
+    }
+  }
+  events.push(...checkSiteDiscoveries(w, t1)); // already logged by discoverSite
   return events;
+}
+
+/** Sites sitting on revealed terrain become DISCOVERED (they still need
+ * an activation flight to be usable). */
+export function checkSiteDiscoveries(w: WorldState, t: number): WorldEvent[] {
+  const out: WorldEvent[] = [];
+  for (const s of SITES) {
+    if (s.body !== 'earth') continue;
+    if (!siteState(w, s.id).discovered && isRevealed(w, s.angle)) {
+      out.push(...discoverSite(w, s.id, t));
+    }
+  }
+  return out;
 }
 
 // ---------- sites ----------
@@ -400,6 +462,22 @@ export function revealArc(w: WorldState, a0: number, da: number): void {
     b[bin >> 3] = (b[bin >> 3]! | (1 << (bin & 7))) & 0xff;
   }
   storeBits(w, b);
+}
+
+/** Reveal specific bins directly (aircraft overflight tracks collected
+ * during a committed flight). */
+export function revealBins(w: WorldState, binsToSet: Iterable<number>): void {
+  const b = bits(w);
+  for (const bin of binsToSet) {
+    const i = ((bin % REVEAL_BINS) + REVEAL_BINS) % REVEAL_BINS;
+    b[i >> 3] = (b[i >> 3]! | (1 << (i & 7))) & 0xff;
+  }
+  storeBits(w, b);
+}
+
+/** Bin index for a surface angle. */
+export function binOf(surfaceAngle: number): number {
+  return Math.floor((wrapAngle(surfaceAngle) / (2 * Math.PI)) * REVEAL_BINS) % REVEAL_BINS;
 }
 
 export function revealedFraction(w: WorldState): number {

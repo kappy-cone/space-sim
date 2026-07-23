@@ -26,7 +26,7 @@ import { siteById } from '../physics/sites';
 import { activeFunc } from '../craft/compile';
 import { addPart } from '../craft/craft';
 import { closestApproach } from './rendezvous';
-import { activateSite, siteAvailable, siteState } from './world';
+import { activateSite, binOf, siteAvailable, siteState } from './world';
 import {
   SpaceObject,
   WorldState,
@@ -316,6 +316,77 @@ describe('satellites', () => {
     );
     expect(w.objects.find((o) => o.id === 'T-1')).toBeUndefined();
     expect(res.events.some((e) => e.type === 'deorbited')).toBe(true);
+  });
+});
+
+describe('terrain reveal', () => {
+  const orbObject = (
+    id: string,
+    h: number,
+    angle: number,
+    func: 'relay' | 'survey',
+  ): SpaceObject => {
+    const r = EARTH.radius + h;
+    const v = Math.sqrt(EARTH.mu / r);
+    return {
+      id,
+      name: id,
+      kind: 'satellite',
+      func,
+      body: 'earth',
+      r: [r * Math.cos(angle), r * Math.sin(angle)],
+      v: [-v * Math.sin(angle), v * Math.cos(angle)],
+      t0: 0,
+      mass: 800,
+      skProp: 0,
+      cdA: 4,
+      launch: 0,
+    };
+  };
+
+  it('with only the Cape station, a survey satellite reveals only the arc around the Cape', () => {
+    // No onboard storage: imaging counts only while LINKED, so one
+    // station bounds the take to its own horizon — the coupling that
+    // makes relays worth launching.
+    const w = emptyWorld();
+    w.objects.push(orbObject('S-1', 500_000, 0, 'survey'));
+    advanceWorld(w, 86_400);
+    const frac = revealedFraction(w);
+    expect(frac).toBeGreaterThan(0.04);
+    expect(frac).toBeLessThan(0.25);
+    expect(isRevealed(w, 0)).toBe(true); // the Cape itself
+    expect(isRevealed(w, Math.PI)).toBe(false); // the far side: never
+    expect(w.log.some((e) => e.type === 'siteDiscovered')).toBe(false); // Wideawake at 32° stays hidden
+  });
+
+  it('a relay constellation unlocks global survey coverage and discovers the hidden sites', () => {
+    const w = emptyWorld();
+    w.objects.push(orbObject('S-1', 500_000, 0, 'survey'));
+    for (let i = 0; i < 3; i++) {
+      w.objects.push(orbObject(`R-${i}`, 20_000_000, (i * 2 * Math.PI) / 3, 'relay'));
+    }
+    const events = advanceWorld(w, 86_400);
+    expect(revealedFraction(w)).toBeGreaterThan(0.8);
+    const found = events.filter((e) => e.type === 'siteDiscovered').map((e) => (e as { site: string }).site);
+    expect(found).toContain('isla-field');
+    expect(found).toContain('runway-west');
+    // Discovered is not activated: the pad still needs its delivery flight.
+    expect(siteState(w, 'runway-west').active).toBe(false);
+  });
+
+  it('overflight bins revealed at harvest discover what was flown over', () => {
+    const compiled = compile(referenceCraft());
+    const sim = new Sim(compiled.vehicle);
+    sim.crashed = true; // outcome irrelevant to the reveal path
+    const isla = siteById('isla-field');
+    const w = emptyWorld();
+    const bins = [binOf(isla.angle - 0.001), binOf(isla.angle), binOf(isla.angle + 0.001)];
+    const res = harvestCommittedFlight(w, [{ sim, name: 'Ferry', overflownBins: bins }], {
+      siteId: 'runway-1',
+      launchName: 'Ferry',
+    });
+    expect(isRevealed(w, isla.angle)).toBe(true);
+    expect(res.events.some((e) => e.type === 'siteDiscovered' && e.site === 'isla-field')).toBe(true);
   });
 });
 
