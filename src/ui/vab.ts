@@ -513,6 +513,19 @@ export class Vab {
     this.recompile();
   }
 
+  /** Roll back to the last pushed undo state as if the aborted gesture
+   * never happened: consumes the entry without touching the redo stack.
+   * (Cancelling a pickup via undo() used to push the broken mid-pickup
+   * craft onto the redo stack and eat legitimate redo history.) */
+  private rollback(): void {
+    const s = this.undoStack.pop();
+    if (!s) return;
+    this.craft = deserialize(s);
+    this.selectedId = null;
+    this.recompile();
+    localStorage.setItem(`${STORAGE_KEY}.undo`, JSON.stringify(this.undoStack.slice(-20)));
+  }
+
   private redo(): void {
     const s = this.redoStack.pop();
     if (!s) return;
@@ -623,7 +636,7 @@ export class Vab {
 
   /** Cursor-ray hit on the cylinder a radial part's axis rides on (parent
    * surface + standoff), as parent-local (angle, y). */
-  private dragRayHit(partId: string): { a: number; y: number } | null {
+  private dragRayHit(partId: string, inflate = 1): { a: number; y: number } | null {
     const part = this.craft.parts[partId];
     if (!part || part.attach.kind !== 'radial' || !part.parentId) return null;
     const parent = this.craft.parts[part.parentId]!;
@@ -632,7 +645,7 @@ export class Vab {
     const inst0 = placements(this.craft).get(parent.id)?.instances[0];
     if (!inst0) return null;
     const ray = this.camera.ray(this.mouse.x, this.mouse.y, this.canvas.clientWidth, this.canvas.clientHeight);
-    const dist = cDef.fin ? pDef.maxRadius : pDef.maxRadius + cDef.maxRadius;
+    const dist = (cDef.fin ? pDef.maxRadius : pDef.maxRadius + cDef.maxRadius) * inflate;
     const hit = rayFrustums(ray.origin, ray.dir, inst0.x, inst0.z, [
       { y0: inst0.y - 3, y1: inst0.y + pDef.height + 3, r0: dist, r1: dist },
     ]);
@@ -641,10 +654,10 @@ export class Vab {
 
   /** Lift a stack part (with its whole subtree) off the craft; it follows
    * the cursor as a ghost until dropped on a valid node. */
-  private beginPickup(id: string): void {
+  private beginPickup(id: string, undoAlreadyPushed = false): void {
     const root = this.craft.parts[id];
     if (!root) return;
-    this.pushUndo();
+    if (!undoAlreadyPushed) this.pushUndo();
     const ids = [id, ...subtreeIds(this.craft, id)];
     const parts = ids.map((i) => this.craft.parts[i]!);
     for (const i of ids) delete this.craft.parts[i];
@@ -670,18 +683,30 @@ export class Vab {
       this.recompile();
     } else {
       this.ghost = null;
-      this.undo(); // restore the pre-pickup craft
+      this.rollback(); // restore the pre-pickup craft; redo history intact
     }
     this.updateHint();
     this.renderInspector();
   }
 
-  /** Drag a radial part along its parent's surface, relative to the grab. */
+  /** Drag a radial part along its parent's surface, relative to the grab.
+   * Dragging clear off the surface lifts the part into the pickup/ghost
+   * flow instead, so radial parts can re-attach to a different parent. */
   private dragMove(): void {
     const part = this.craft.parts[this.draggingPart!];
     if (!part || part.attach.kind !== 'radial' || !part.parentId) return;
     const hit = this.dragRayHit(part.id);
-    if (!hit) return; // cursor slid off — hold position
+    if (!hit) {
+      // Grazing the silhouette edge still counts as "on the surface" —
+      // only a miss of the 1.6× inflated cylinder converts to a pickup.
+      if (this.dragRayHit(part.id, 1.6)) return; // hold position
+      const id = part.id;
+      const undoPushed = this.dragStarted;
+      this.draggingPart = null;
+      if (!this.dragStarted) this.selectedId = id;
+      this.beginPickup(id, undoPushed);
+      return;
+    }
     if (!this.dragStarted) {
       this.pushUndo();
       this.dragStarted = true;
@@ -701,11 +726,12 @@ export class Vab {
     }
     if (e.key === 'Escape') {
       if (this.pickedUp) {
-        // Cancel a pick-up: restore the pre-drag craft.
+        // Cancel a pick-up: restore the pre-drag craft (pure rollback —
+        // not an undo, so redo history survives).
         this.pickedUp = null;
         this.holding = null;
         this.ghost = null;
-        this.undo();
+        this.rollback();
       }
       this.holding = null;
       this.ghost = null;
