@@ -82,14 +82,29 @@ docs/WORLD.md "Combat".
 - **Far theater**: `far-base` + `far-runway-a/b` in sites.ts (Meridian
   Base, angle π), discoverable.
 
-Combat loose ends (next): no INTERACTIVE dogfight view (it's headless +
-tested; a 2-D replay canvas like the Program view would be the cheap
-add); PN guidance is NOT wired into the flight view's released darts
-(they drop ballistic there); no gun/second weapon; equal-energy 1v1
-survivors stalemate (cut at 35 s of no action, resolved on numbers); the
-combat AI is the one autopilot for non-player craft (documented
-exception to the no-scripting invariant). Aircraft turn/g and lethal
-radius are flagged estimates.
+Combat updates (second combat turn): loadout is now **4 missiles per
+fighter** (3 s salvo interval), lively multi-volley furballs. Dogfight
+refactored into a **steppable `Dogfight` class** (fixed-dt `step()` +
+wall-clock `advance()`); `simulateDogfight` unchanged for tests.
+**Real-time 3-D view shipped**: `ui/dogfight3d.ts` (low-poly delta jets,
+coordinated-turn banking, wing missiles that deplete, PN trails, ground
+grid, follow camera, HUD + speed/pause/new-fight controls), reached from
+a **Dogfight button in the VAB**. Procedural meshes only.
+
+Combat loose ends (next): PN guidance is NOT wired into the flight
+view's released darts (they drop ballistic there); no gun/second weapon;
+equal-energy survivors stalemate (cut at 35 s no-action, resolved on
+numbers); the combat AI is the one autopilot for non-player craft
+(documented exception to no-scripting). Aircraft turn/g and lethal
+radius are flagged estimates. The Air Launcher builder starter still
+carries ONE release pylon (the 4-missile loadout is a dogfight-model
+default, not wired to builder pylon count).
+
+Assets: **docs/ASSETS.md** is the scoping doc (Kenney/Quaternius CC0
+verified, formats, the tiny-deps blocker). Recommendation: stay
+procedural; when models are wanted, hand-roll a ~200-line `.glb` mesh
+loader (Option A, zero-dep) and start with a Quaternius jet. No asset
+pipeline exists yet — see [[user-asset-licensing]].
 
 ## Hard invariants (unchanged, plus one new)
 
