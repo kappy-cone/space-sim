@@ -464,6 +464,20 @@ export class Vab {
       `<h3>${def.name}</h3><div class="readouts">` +
       rows.map(([l, v]) => `<div class="label">${l}</div><div class="value">${v}</div>`).join('') +
       '</div>';
+    // Release pylons: what class the released stack flies as. Default
+    // rocket; a released plane (X-15 glide-back) needs the flag so its
+    // wings lift after the drop.
+    if (def.release) {
+      const btn = document.createElement('button');
+      btn.style.marginTop = '6px';
+      btn.textContent = `Releases as: ${p.payloadClass === 'plane' ? '✈ plane' : '🚀 rocket'} (toggle)`;
+      btn.onclick = () => {
+        this.pushUndo();
+        p.payloadClass = p.payloadClass === 'plane' ? 'rocket' : 'plane';
+        this.recompile();
+      };
+      this.inspectorEl.appendChild(btn);
+    }
     // Parametric tank length: a live slider — length is a build
     // parameter, not a part variant.
     if (def.lengthRange) {
@@ -613,7 +627,10 @@ export class Vab {
            <span class="legend"><i class="dot com"></i>CoM <i class="dot cop"></i>CoP</span></div>`
         : '';
     }
-    const warnings = c.warnings.map((w) => `<div class="warning">⚠ ${w}</div>`).join('');
+    const blockers = c.blockers
+      .map((b) => `<div class="warning" style="color: var(--bad)">⛔ ${b}</div>`)
+      .join('');
+    const warnings = blockers + c.warnings.map((w) => `<div class="warning">⚠ ${w}</div>`).join('');
     this.statsEl.innerHTML = `
       <h3>Vehicle</h3>
       <table class="stage-table">
@@ -624,7 +641,7 @@ export class Vab {
       ${verdict}
       ${stability}
       ${warnings}
-      <button class="primary launch-btn">Launch ▸</button>`;
+      <button class="primary launch-btn" ${c.blockers.length > 0 ? 'disabled' : ''}>${c.blockers.length > 0 ? 'Cannot fly' : 'Launch ▸'}</button>`;
     this.statsEl.querySelector<HTMLButtonElement>('.launch-btn')!.onclick = () => this.launchDialog();
   }
 

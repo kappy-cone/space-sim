@@ -103,3 +103,29 @@ describe('release compile split', () => {
     expect(run()).toBe(run());
   });
 });
+
+describe('carriage limits (air-launch ceiling)', () => {
+  it('the starter dart is inside the pylon rating; a fat payload is refused', () => {
+    const ok = airLauncher();
+    expect(ok.blockers).toEqual([]);
+    // Hang a 3.7 m-class heavy stack under the pylon: over both the
+    // 26 t LauncherOne-class mass rating and the 1.6 m clearance.
+    const craft = starterCrafts().find((s) => s.name === 'Air Launcher')!.craft;
+    const pylon = Object.values(craft.parts).find((p) => p.defId === 'pylon-release')!;
+    const dart = Object.values(craft.parts).find((p) => p.parentId === pylon.id)!;
+    craft.parts[dart.id] = { ...dart, defId: 't37-m' }; // 3.7 m kerolox tank, tens of tonnes wet
+    const c = compile(craft);
+    expect(c.blockers.length).toBeGreaterThanOrEqual(2); // mass AND diameter
+    expect(c.blockers.join(' ')).toMatch(/carriage/);
+  });
+
+  it('payloadClass on the pylon releases a plane-class sub-craft', () => {
+    const craft = starterCrafts().find((s) => s.name === 'Air Launcher')!.craft;
+    const pylon = Object.values(craft.parts).find((p) => p.defId === 'pylon-release')!;
+    pylon.payloadClass = 'plane';
+    const c = compile(craft);
+    // The released stack now compiles with plane aero present (wingless
+    // plane: empty surface list, but the CLASS gates planeAero on).
+    expect(c.released![0]!.sub.vehicle.planeAero).toBeDefined();
+  });
+});

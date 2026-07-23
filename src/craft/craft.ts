@@ -25,6 +25,10 @@ export interface CraftPart {
    * Length is a build-time parameter — the discrete axes are
    * fluid × diameter; two tanks differing only in length are not parts. */
   length?: number;
+  /** Release pylons only: vehicle class of the released stack. Default
+   * rocket — a released PLANE (glide-back testbed, X-15 style) needs
+   * the flag so its wings actually lift after the drop. */
+  payloadClass?: 'rocket' | 'plane';
 }
 
 export interface Craft {
@@ -447,8 +451,10 @@ export function placements(craft: Craft): Map<string, Placement> {
 /**
  * Re-root the subtree hanging under a release pylon as its own Craft —
  * what the released vessel compiles from. The pylon itself is NOT
- * included (it stays with the carrier). Class defaults to rocket: the
- * released stack flies on its own merits, not the carrier's wings.
+ * included (it stays with the carrier). Class defaults to rocket — the
+ * released stack flies on its own merits, not the carrier's wings —
+ * unless the pylon's payloadClass says the payload IS a plane (X-15
+ * style glide-back).
  */
 export function subCraftFrom(craft: Craft, pylonId: string): Craft {
   const child = children(craft, pylonId).find((c) => c.attach.kind === 'below');
@@ -457,7 +463,14 @@ export function subCraftFrom(craft: Craft, pylonId: string): Craft {
   // subtreeIds lists DESCENDANTS only — the new root is added explicitly.
   for (const id of [child.id, ...subtreeIds(craft, child.id)]) parts[id] = { ...craft.parts[id]! };
   parts[child.id] = { ...parts[child.id]!, parentId: null, attach: { kind: 'below' } };
-  return { name: `${craft.name} payload`, rootId: child.id, parts, stageOrder: [] };
+  const cls = craft.parts[pylonId]?.payloadClass;
+  return {
+    name: `${craft.name} payload`,
+    rootId: child.id,
+    parts,
+    stageOrder: [],
+    ...(cls === 'plane' ? { vehicleClass: 'plane' as const } : {}),
+  };
 }
 
 /** Total instance count for a part (its own symmetry times every radial

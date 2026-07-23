@@ -80,6 +80,9 @@ export interface Compiled {
   reports: StageReport[];
   totalDeltaV: number;
   warnings: string[];
+  /** Hard failures: the vehicle cannot fly at all (e.g. a release
+   * payload over the pylon's carriage rating). Launch is refused. */
+  blockers: string[];
   verdict: { ok: boolean; margin: number };
   geometry: VehicleGeometry;
   fairings: FairingInfo[];
@@ -275,12 +278,34 @@ export function compile(craft: Craft): Compiled {
   // release is by construction, not by estimate. The sub-compile also
   // gives the spawned vessel its own stages/pools/geometry.
   const released: { pylonId: string; sectionBurnIndex: number; sub: Compiled; subCraft: Craft; name: string }[] = [];
+  const blockers: string[] = [];
   for (const [secIdx, pylonId] of releasePylons) {
     const subCraft = subCraftFrom(craft, pylonId);
     const sub = compile(subCraft);
     sections[secIdx]!.stage.extraDryMass =
       (sections[secIdx]!.stage.extraDryMass ?? 0) + massFromStage(sub.vehicle, 0);
     released.push({ pylonId, sectionBurnIndex: order.indexOf(secIdx), sub, subCraft, name: subCraft.name });
+    // Hard carriage ceiling: the pylon rating, not the carrier's lift,
+    // is the limit — over it the vehicle does not leave the ground.
+    const lim = partById(craft.parts[pylonId]!.defId).release;
+    if (lim) {
+      const wet = massFromStage(sub.vehicle, 0);
+      if (wet > lim.maxMass) {
+        blockers.push(
+          `Release payload ${(wet / 1000).toFixed(1)} t exceeds the pylon's ${(lim.maxMass / 1000).toFixed(0)} t carriage rating.`,
+        );
+      }
+      let maxR = 0;
+      for (const sp of Object.values(subCraft.parts)) {
+        const d = partById(sp.defId);
+        if (!d.wing && !d.fin) maxR = Math.max(maxR, d.maxRadius);
+      }
+      if (maxR > lim.maxRadius) {
+        blockers.push(
+          `Release payload diameter ${(2 * maxR).toFixed(1)} m exceeds the pylon's ${(2 * lim.maxRadius).toFixed(1)} m carriage clearance.`,
+        );
+      }
+    }
   }
 
   // Per-section fluid + pool bookkeeping. A section is solid-powered or
@@ -832,6 +857,7 @@ export function compile(craft: Craft): Compiled {
     reports,
     totalDeltaV: dv,
     warnings,
+    blockers,
     verdict: { ok: dv >= LEO_BUDGET, margin: dv - LEO_BUDGET },
     geometry,
     fairings,

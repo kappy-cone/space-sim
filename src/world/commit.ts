@@ -183,6 +183,11 @@ export function harvestCommittedFlight(
     if (s.crashed) continue;
     if (s.landed || s.hasLanded) {
       recovered.push(v.name);
+      // Recovery is SCORED: it enters the program log (a carrier flown
+      // home after its release is a reusable asset, and the log says so).
+      const rev: WorldEvent = { type: 'recovered', t: s.state.t, name: v.name };
+      events.push(rev);
+      pushLog(w, rev);
       // A plane down on a runway is a delivery flight: wear the strip
       // (harder if the touchdown was rough), and if the field was not
       // yet built out, this landing IS the hardware arriving — activate

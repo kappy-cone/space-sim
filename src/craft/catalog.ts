@@ -117,8 +117,10 @@ export interface PartDef {
   crossfeed?: boolean;
   /** Release pylon: separation SPAWNS the subtree as a live second
    * vessel instead of subtracting its mass (air launch). The pylon
-   * stays with the carrier. */
-  release?: boolean;
+   * stays with the carrier. Carriage limits are HARD — the pylon
+   * structure, not the carrier's lift, is the ceiling the player
+   * cannot engineer around (compile refuses over-limit payloads). */
+  release?: { maxMass: number; maxRadius: number };
   /** Dedicated ullage motor: fired to settle propellant, not propulsion. */
   ullage?: boolean;
   /** Satellite function module: what the stack DOES once it is on orbit
@@ -484,8 +486,9 @@ export const PARTS: readonly PartDef[] = [
     segments: [cyl(0.24, 0.8)],
     color: [0.6, 0.62, 0.7],
     dryMass: 220,
-    source: 'B-52/X-15 pylon-and-hooks class — mass ESTIMATE; hooks stay with the carrier on release',
-    release: true,
+    source:
+      'B-52/X-15 pylon-and-hooks class — mass ESTIMATE; hooks stay with the carrier on release. Carriage ceiling: LauncherOne under Cosmic Girl flew 25,850 kg × 1.6 m dia; Pegasus/L-1011 23,130 kg × 1.27 m',
+    release: { maxMass: 26_000, maxRadius: 0.8 },
     stackTop: false,
     stackBottom: true, // the released vehicle hangs from the pylon
     radialParent: false,

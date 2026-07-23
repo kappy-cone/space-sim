@@ -88,6 +88,7 @@ export type WorldEvent =
   | { type: 'deployed'; t: number; id: string; name: string; func?: SatelliteFunc }
   | { type: 'debris'; t: number; id: string; name: string }
   | { type: 'rangeViolation'; t: number; site: string }
+  | { type: 'recovered'; t: number; name: string }
   | { type: 'siteDiscovered'; t: number; site: string }
   | { type: 'siteActivated'; t: number; site: string }
   | { type: 'deorbited'; t: number; id: string; name: string }
