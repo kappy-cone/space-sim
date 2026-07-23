@@ -85,7 +85,11 @@ describe('suicide burn: the autopilot flies the predictor', () => {
     expect(landed).toBeDefined();
     if (landed?.type === 'landed') {
       expect(landed.vSpeed).toBeLessThan(TOUCHDOWN_LIMITS.legs.vSpeed);
-      expect(landed.vSpeed).toBeLessThan(3.5); // gentle, not a scrape-through
+      // Gentle, not a scrape-through: the √-profile final descent (v_t
+      // tapers from √(2·a_net·h) to 2 m/s) touches down around 4 m/s —
+      // firmer than the old flat 2 m/s crawl, far inside the 6.0 limit,
+      // and it no longer burns minutes of hover propellant.
+      expect(landed.vSpeed).toBeLessThan(4.5);
     }
     // Landed regime is frozen: no drift over a long rest.
     const altBefore = sim.radarAltitude;
@@ -163,6 +167,37 @@ describe('moon landing', () => {
     const altBefore = sim.radarAltitude;
     sim.step(600);
     expect(Math.abs(sim.radarAltitude - altBefore)).toBeLessThan(1e-6);
+  });
+
+  it('lands an orbital-class arrival in two burns without running dry', () => {
+    // Reproduces the failure the first full moon mission exposed: a large
+    // horizontal component means the braking burn nulls the velocity far
+    // above the surface. The old single-burn flow then hover-crawled down
+    // from ~90 km and ran the tank dry; the fix shuts down, falls, and
+    // re-arms the predictor for a terminal burn.
+    const { vehicle } = lander();
+    const moon = bodyById('moon');
+    const sim = new Sim(vehicle, moon);
+    const ap = new LandingAutopilot();
+    // 60 km up with 80% of circular-orbital horizontal speed: an
+    // impacting trajectory that still carries ~1.3 km/s across.
+    const r = moon.radius + 60_000;
+    const vOrb = Math.sqrt(moon.mu / r);
+    sim.landed = false;
+    sim.state = { r: vec(r, 0), v: vec(-30, 0.8 * vOrb), theta: 0, omega: 0, m: sim.state.m, t: 0 };
+    while (ap.phase !== 'done' && ap.phase !== 'failed' && sim.state.t < 3_000) {
+      ap.update(sim);
+      sim.step(0.05);
+    }
+    expect(ap.phase).toBe('done');
+    const landed = sim.events.find((e) => e.type === 'landed');
+    expect(landed).toBeDefined();
+    if (landed?.type === 'landed') {
+      expect(landed.vSpeed).toBeLessThan(TOUCHDOWN_LIMITS.legs.vSpeed);
+      expect(landed.hSpeed).toBeLessThan(TOUCHDOWN_LIMITS.legs.hSpeed);
+    }
+    expect(sim.propellant).toBeGreaterThan(0); // margin, not a scraped pass
+    expect(sim.events.some((e) => e.type === 'ignitionFailed')).toBe(false);
   });
 
   it('nulls a 25 m/s horizontal drift before touchdown (no drag to help)', () => {

@@ -226,10 +226,15 @@ export class Sim {
 
   /**
    * Suicide-burn altitude: the radar altitude at which a full-throttle
-   * retrograde burn just nulls the vertical speed at the surface —
-   * h = v²/(2(a_max − g)) with current mass and local thrust, plus one
-   * spool time-constant of free fall as margin. NaN when not descending
-   * or when max thrust cannot beat gravity.
+   * retrograde burn just nulls the TOTAL surface-relative speed at the
+   * surface — h = v_tot²/(2(a_max − g)) with current mass and local
+   * thrust, plus one spool time-constant of fall as margin. Using the
+   * total speed (not just vertical) is what makes the trigger safe for
+   * orbital-class arrivals, where most of the velocity is horizontal but
+   * the same engine must kill all of it; on a pure drop the two are
+   * identical, and on shallow arrivals the early trigger feeds the
+   * landing autopilot's two-burn (brake → fall → terminal) profile.
+   * NaN when not descending or when max thrust cannot beat gravity.
    */
   get suicideBurnAltitude(): number {
     const stage = this.vehicle.stages[this.stageIndex];
@@ -239,7 +244,7 @@ export class Sim {
     const g = this.body.mu / (rn * rn);
     const aMax = stageThrustAtPressure(stage, p) / this.state.m - g;
     if (aMax <= 0) return NaN;
-    const v = this.vSpeed;
+    const v = norm(this.airspeedVec);
     return (v * v) / (2 * aMax) + v * SPOOL_TAU;
   }
 

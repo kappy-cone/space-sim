@@ -120,10 +120,13 @@ export const ENGINES: readonly Engine[] = [
     mass: 35,
     vacuumOnly: false,
     // Electric-pump feed makes deep throttling plausible; no figure is
-    // published - 20% is a LOW-CONFIDENCE ESTIMATE. Relights: the second
-    // stage engine performs restart burns; 2 lights (ESTIMATE).
+    // published - 20% is a LOW-CONFIDENCE ESTIMATE. Relights: spark-torch
+    // ignition with electric pumps has no igniter-fluid budget, and the
+    // second stage performs restart burns; qualification numbers are not
+    // public - 5 lights is an ESTIMATE (a two-burn powered landing plus
+    // terminal pulses fits; unlimited felt too generous for batteries).
     minThrottle: 0.2,
-    ignitions: 2,
+    ignitions: 5,
   },
 ];
 

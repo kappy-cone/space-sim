@@ -48,24 +48,24 @@ describe('min-throttle floor', () => {
 });
 
 describe('ignition budget', () => {
-  it('a Rutherford stage gets 2 lights; the third is denied and named', () => {
-    const sim = vacuumShip('rutherford');
+  it('a Merlin Vacuum stage gets 3 lights; the fourth is denied and named', () => {
+    const sim = vacuumShip('merlin-vac');
     const burnCoast = () => {
       sim.throttle = 1;
       for (let i = 0; i < 60; i++) sim.step(0.05); // light + burn 3 s
       sim.throttle = 0;
       for (let i = 0; i < 100; i++) sim.step(0.05); // spool fully down
     };
-    burnCoast(); // ignition 1
-    expect(sim.ignitionsUsed[0]).toBe(1);
-    burnCoast(); // ignition 2
-    expect(sim.ignitionsUsed[0]).toBe(2);
-    sim.throttle = 1; // ignition 3: denied
+    for (let n = 1; n <= 3; n++) {
+      burnCoast();
+      expect(sim.ignitionsUsed[0]).toBe(n);
+    }
+    sim.throttle = 1; // ignition 4: denied
     for (let i = 0; i < 40; i++) sim.step(0.05);
     expect(sim.actualThrottle).toBe(0);
     const denied = sim.events.find((e) => e.type === 'ignitionFailed');
     expect(denied).toBeDefined();
-    if (denied?.type === 'ignitionFailed') expect(denied.limit).toBe(2);
+    if (denied?.type === 'ignitionFailed') expect(denied.limit).toBe(3);
   });
 
   it('the ground-lit RS-25 cannot relight in flight', () => {
