@@ -8,14 +8,24 @@
 // paths and leave trails. Low-poly procedural meshes only — no assets.
 
 import { Dogfight, Fighter, Missile } from '../combat/dogfight';
+import { EARTH } from '../physics/bodies';
+import { SITES, Site } from '../physics/sites';
+import { WorldState } from '../world/world';
 import { OrbitCamera } from '../gl/camera';
 import { Mat4, identity, multiply, rotationY, rotationZ, scaling, scalingXYZ, translation, v3, V3 } from '../gl/mat4';
-import { MeshData, gridMesh } from '../gl/mesh';
+import { MeshData, sphereMesh, terrainColor } from '../gl/mesh';
 import { loadGlbMesh } from '../gl/glb';
 import { Renderer } from '../gl/renderer';
+import { fmtTime } from './format';
 
-/** Visual altitude of the fight above the ground grid [m]. */
+/** Visual altitude of the fight above the surface [m]. The whole
+ * engagement is staged over the far-side Meridian base — the same world
+ * the flights use — so the ground below is the real Earth, not a grid. */
 const ARENA_ALT = 4_000;
+const R_EARTH = EARTH.radius;
+/** Local downrange offset [m] of a far-side site from the base meridian
+ * (angle π), used to place its runway in the arena's tangent frame. */
+const siteLocalX = (s: Site): number => (s.angle - Math.PI) * R_EARTH;
 /** Aircraft/missile meshes drawn oversize so they read against a km-scale
  * arena — a tactical-display convention, like map markers (the TRAILS
  * show the true paths). */
@@ -137,7 +147,13 @@ export class Dogfight3D {
   private playBtn!: HTMLButtonElement;
   private speedBtn!: HTMLButtonElement;
 
-  constructor(private root: HTMLElement, private onExit: () => void, seed = 1) {
+  /** The two far-side team bases (Meridian Runway A/B) — the same sites
+   * the flights use, read straight from the world geography. */
+  private readonly runwayA = SITES.find((s) => s.id === 'far-runway-a');
+  private readonly runwayB = SITES.find((s) => s.id === 'far-runway-b');
+  private readonly base = SITES.find((s) => s.id === 'far-base');
+
+  constructor(private root: HTMLElement, private onExit: () => void, private worldState?: WorldState, seed = 1) {
     this.seed = seed;
     this.df = new Dogfight({ seed });
     root.innerHTML = '';
@@ -147,13 +163,14 @@ export class Dogfight3D {
     this.renderer = new Renderer(this.canvas);
     this.renderer.mesh('df-jet', jetMesh);
     this.renderer.mesh('df-missile', missileMesh);
+    // A flat quad (for runways/pad) and the real Earth sphere below.
     this.renderer.mesh('df-ground', () =>
       triMesh([
         ...dbl(p(-1, 0, -1), p(1, 0, -1), p(1, 0, 1)),
         ...dbl(p(-1, 0, -1), p(1, 0, 1), p(-1, 0, 1)),
       ]),
     );
-    this.renderer.lineMesh('df-grid', gridMesh(24_000, 2_000));
+    this.renderer.mesh('df-planet', () => sphereMesh(48, 72, terrainColor));
     // Real Quaternius jet (CC0) — async; the procedural delta flies
     // until (and if) it arrives.
     loadGlbMesh('/models/jet.glb')
@@ -206,7 +223,9 @@ export class Dogfight3D {
     this.hud.className = 'hud';
     const panel = document.createElement('div');
     panel.className = 'panel';
-    panel.innerHTML = '<h3>Engagement</h3>';
+    // Staged in the same world the flights use, over the far-side base.
+    const worldClock = this.worldState ? ` · world T ${fmtTime(this.worldState.epoch)}` : '';
+    panel.innerHTML = `<h3>Engagement</h3><div class="value" style="color:var(--text-dim);font-size:11px;margin-bottom:4px">${this.base?.name ?? 'Far-side base'}${worldClock}</div>`;
     const grid = document.createElement('div');
     grid.className = 'readouts';
     grid.innerHTML =
@@ -259,7 +278,7 @@ export class Dogfight3D {
     const hint = document.createElement('div');
     hint.className = 'vab-hint';
     hint.style.bottom = '62px';
-    hint.textContent = 'drag: orbit · wheel: zoom · 3 Blue vs 3 Red air-launch fighters, 4 missiles each (proportional-navigation homing)';
+    hint.textContent = 'Meridian Base (far side) · drag: orbit · wheel: zoom · 3 Blue vs 3 Red air-launch fighters, 4 missiles each (proportional-navigation homing)';
     this.root.appendChild(hint);
   }
 
@@ -330,13 +349,30 @@ export class Dogfight3D {
   private draw(): void {
     const w = this.canvas.clientWidth || 1;
     const h = this.canvas.clientHeight || 1;
-    const near = Math.max(20, this.camera.dist * 0.02);
-    const far = this.camera.dist * 12 + 200_000;
+    const near = Math.max(50, this.camera.dist * 0.02);
+    const far = this.camera.dist * 8 + 2 * R_EARTH;
     this.renderer.begin(this.camera.proj(w / h, near, far), this.camera.viewRot(), this.camera.eye(), [0.36, 0.52, 0.72]);
 
-    // Ground: a tinted plane under the arena + a grid for scale/motion.
-    this.renderer.draw('df-ground', scalingXYZ(60_000, 1, 60_000), [0.16, 0.28, 0.2], 1);
-    this.renderer.draw('df-grid', translation(0, 2, 0), [0.3, 0.42, 0.5], 0.5, true);
+    // The real Earth below: the base sits at the top of the globe (its
+    // center is one radius straight down), so the surface reads as a
+    // curved horizon — this is the same world the flights fly in, viewed
+    // over the far-side Meridian complex. depthPush keeps the near-field
+    // runways/pad from z-fighting the planet-scale sphere.
+    this.renderer.draw('df-planet', multiply(translation(0, -R_EARTH, 0), scaling(R_EARTH)), [1, 1, 1], 1, false, false, true);
+    // Atmosphere haze shell for a soft horizon.
+    this.renderer.draw('df-planet', multiply(translation(0, -R_EARTH, 0), scaling(R_EARTH + 40_000)), [0.5, 0.65, 0.9], 0.08);
+
+    // The two team bases: Meridian Runway A (Blue) west, Runway B (Red)
+    // east, with the base pad on the meridian between them — placed at
+    // their real world offsets from sites.ts. Strips run along the
+    // downrange (merge) axis; each team launches toward the centre.
+    if (this.base) this.renderer.draw('df-ground', multiply(translation(siteLocalX(this.base), 6, 0), scalingXYZ(220, 1, 220)), [0.26, 0.27, 0.3], 1);
+    const strip = (s: Site | undefined, tint: [number, number, number]): void => {
+      if (!s) return;
+      this.renderer.draw('df-ground', multiply(translation(siteLocalX(s), 8, 0), scalingXYZ(s.halfLength ?? 2_000, 1, 60)), tint, 1);
+    };
+    strip(this.runwayA, [0.24, 0.28, 0.4]);
+    strip(this.runwayB, [0.4, 0.28, 0.28]);
 
     // Trails.
     for (const [key, tr] of this.trails) {

@@ -56,7 +56,7 @@ function showFlight(compiled: Compiled, craft: Craft, launch: LaunchContext): vo
 
 function showDogfight(): void {
   current?.destroy();
-  current = new Dogfight3D(app, showVab);
+  current = new Dogfight3D(app, showVab, world);
 }
 
 showVab();
