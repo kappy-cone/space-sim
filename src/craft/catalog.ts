@@ -45,7 +45,7 @@ export interface DeployDef {
   reversible: boolean;
   /** Mass change on deploy [kg] (jettisoned fairing shells: −dryMass). */
   massDelta: number;
-  effect: 'nozzle' | 'fairing';
+  effect: 'nozzle' | 'fairing' | 'legs' | 'chutes';
 }
 
 export interface ControlDef {
@@ -512,6 +512,7 @@ export const PARTS: readonly PartDef[] = [
     radialParent: false,
     radialChild: true,
     leg: { reach: 2.2 },
+    deploy: { label: 'Deploy landing legs', reversible: false, massDelta: 0, effect: 'legs' },
   }),
   def({
     id: 'leg-l',
@@ -526,6 +527,7 @@ export const PARTS: readonly PartDef[] = [
     radialParent: false,
     radialChild: true,
     leg: { reach: 4.5 },
+    deploy: { label: 'Deploy landing legs', reversible: false, massDelta: 0, effect: 'legs' },
   }),
   def({
     id: 'chute-main',
@@ -540,6 +542,7 @@ export const PARTS: readonly PartDef[] = [
     radialParent: false,
     radialChild: true,
     chute: { cdA: 1_400, safeQ: 2_500 },
+    deploy: { label: 'Deploy parachute', reversible: false, massDelta: 0, effect: 'chutes' },
   }),
   def({
     id: 'chute-drogue',
@@ -554,6 +557,7 @@ export const PARTS: readonly PartDef[] = [
     radialParent: false,
     radialChild: true,
     chute: { cdA: 25, safeQ: 12_000 },
+    deploy: { label: 'Deploy parachute', reversible: false, massDelta: 0, effect: 'chutes' },
   }),
   // ---- fins (aluminum-plate mass estimate: planform area × t × 2700) ----
   finDef('fin-s', 'Fin S', { cr: 0.8, ct: 0.4, span: 0.55, sweep: 0.3, thickness: 0.012 }),

@@ -495,10 +495,18 @@ export class Vab {
       .join('');
     // Deployables ride the same sequence in flight (space steps through
     // separations first, then these) — shown here so the order is legible
-    // before launch. Manual keys (G/P) fire them anytime.
+    // before launch. Manual keys fire them anytime. Discovered generically
+    // from the parts' DeployDefs: a new tail effect (e.g. landing gear)
+    // shows up here with zero new UI code.
+    const tailEffects: [string, string][] = [
+      ['legs', 'G'],
+      ['chutes', 'P'],
+    ];
     const deployables: string[] = [];
-    if (c.geometry.legs.length > 0) deployables.push('Deploy landing legs (G)');
-    if (c.geometry.chutes.length > 0) deployables.push('Deploy parachute (P)');
+    for (const [effect, key] of tailEffects) {
+      const p = Object.values(this.craft.parts).find((cp) => partById(cp.defId).deploy?.effect === effect);
+      if (p) deployables.push(`${partById(p.defId).deploy!.label} (${key})`);
+    }
     const tail =
       deployables.length > 0
         ? `<div class="stage-row"><div class="stage-row-head"><b>Then</b></div>${deployables

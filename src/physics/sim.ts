@@ -369,6 +369,24 @@ export class Sim {
     if (this.activeChutes().length > 0) this.events.push({ type: 'chuteDeployed', t: this.state.t });
   }
 
+  /** Generic deploy dispatcher — one entry point for every DeployDef
+   * effect, so parts declare deployability and callers stop
+   * special-casing kinds. */
+  deploy(effect: 'legs' | 'chutes' | 'fairing' | 'nozzle'): void {
+    if (effect === 'legs') this.deployLegs();
+    else if (effect === 'chutes') this.deployChutes();
+    else if (effect === 'fairing') this.jettisonFairings();
+    else this.deployNozzle();
+  }
+
+  /** Whether a one-shot deploy effect has already fired (staging-queue
+   * satisfied check; nozzle is per-stage and checked separately). */
+  deployDone(effect: 'legs' | 'chutes' | 'fairing'): boolean {
+    if (effect === 'legs') return this.legsDeployed;
+    if (effect === 'chutes') return this.chutesDeployed;
+    return this.fairingsJettisoned;
+  }
+
   stage(): void {
     if (this.stageIndex >= this.vehicle.stages.length) return;
     const dropped = this.vehicle.stages[this.stageIndex]!;

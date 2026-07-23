@@ -92,7 +92,7 @@ export class Flight3D {
    * are "consumed" implicitly when the sim state already reflects them
    * (autopilot separations, manual P/G deploys), so space always
    * triggers the next action that still makes sense. */
-  private stagingEntries: { kind: 'sep' | 'legs' | 'chutes' | 'fairing' | 'nozzle'; afterStage: number; label: string }[] = [];
+  private stagingEntries: { kind: 'sep' | 'deploy' | 'nozzle'; afterStage: number; label: string; effect?: 'legs' | 'chutes' | 'fairing' }[] = [];
   private consumedEntries = new Set<number>();
   private stageBtn!: HTMLButtonElement;
 
@@ -183,20 +183,20 @@ export class Flight3D {
     for (let i = 0; i + 1 < vStages.length; i++) {
       this.stagingEntries.push({ kind: 'sep', afterStage: i, label: `Separate stage ${i + 1}` });
       if (i === 0 && hasFairings) {
-        this.stagingEntries.push({ kind: 'fairing', afterStage: -1, label: 'Jettison fairing' });
+        this.stagingEntries.push({ kind: 'deploy', effect: 'fairing', afterStage: -1, label: 'Jettison fairing' });
       }
       if (hasNozzle(i + 1)) {
         this.stagingEntries.push({ kind: 'nozzle', afterStage: i + 1, label: 'Extend nozzle' });
       }
     }
     if (vStages.length === 1 && hasFairings) {
-      this.stagingEntries.push({ kind: 'fairing', afterStage: -1, label: 'Jettison fairing' });
+      this.stagingEntries.push({ kind: 'deploy', effect: 'fairing', afterStage: -1, label: 'Jettison fairing' });
     }
     if (compiled.geometry.legs.length > 0) {
-      this.stagingEntries.push({ kind: 'legs', afterStage: -1, label: 'Deploy landing legs' });
+      this.stagingEntries.push({ kind: 'deploy', effect: 'legs', afterStage: -1, label: 'Deploy landing legs' });
     }
     if (compiled.geometry.chutes.length > 0) {
-      this.stagingEntries.push({ kind: 'chutes', afterStage: -1, label: 'Deploy parachute' });
+      this.stagingEntries.push({ kind: 'deploy', effect: 'chutes', afterStage: -1, label: 'Deploy parachute' });
     }
 
     this.geomLength = compiled.geometry.length;
@@ -424,9 +424,7 @@ export class Flight3D {
       if (this.consumedEntries.has(i)) continue;
       const e = this.stagingEntries[i]!;
       if (e.kind === 'sep' && this.sim.stageIndex > e.afterStage) continue;
-      if (e.kind === 'legs' && this.sim.legsDeployed) continue;
-      if (e.kind === 'chutes' && this.sim.chutesDeployed) continue;
-      if (e.kind === 'fairing' && this.sim.fairingsJettisoned) continue;
+      if (e.kind === 'deploy' && this.sim.deployDone(e.effect!)) continue;
       if (e.kind === 'nozzle' && this.sim.nozzleDeployed.has(e.afterStage)) continue;
       return i;
     }
@@ -449,9 +447,7 @@ export class Flight3D {
     }
     this.consumedEntries.add(i);
     if (e.kind === 'sep') this.sim.stage();
-    else if (e.kind === 'legs') this.sim.deployLegs();
-    else if (e.kind === 'chutes') this.sim.deployChutes();
-    else this.sim.jettisonFairings();
+    else this.sim.deploy(e.effect!);
   }
 
   /** Right-drag steering: pitch the commanded attitude in the orbital
