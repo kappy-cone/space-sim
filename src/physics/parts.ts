@@ -25,6 +25,12 @@ export const ENGINES: readonly Engine[] = [
     // 470 kg incl. TVC actuators — Tom Mueller (SpaceX propulsion CTO), 2015.
     mass: 470,
     vacuumOnly: false,
+    // Throttle 40% reported for Merlin 1D (SpaceX statements, not a formal
+    // datasheet figure — treat as an estimate). TEA-TEB igniter capacity
+    // sized for the flown boostback/entry/landing profile: 3 lights
+    // (ESTIMATE from flight profiles; never published).
+    minThrottle: 0.4,
+    ignitions: 3,
   },
   {
     id: 'merlin-vac',
@@ -38,6 +44,10 @@ export const ENGINES: readonly Engine[] = [
     // ESTIMATE ~600 kg (M1D 470 kg + nozzle extension); never published.
     mass: 600,
     vacuumOnly: true, // radiatively-cooled nozzle would flow-separate at 1 atm
+    // ~39% reported minimum (SpaceX statements — estimate). Multi-burn GTO
+    // missions demonstrate 3 lights routinely (ESTIMATE from profiles).
+    minThrottle: 0.39,
+    ignitions: 3,
   },
   {
     id: 'rs-25',
@@ -53,6 +63,10 @@ export const ENGINES: readonly Engine[] = [
     // 3527 kg (7,775 lb) — Aerojet Rocketdyne data.
     mass: 3_527,
     vacuumOnly: false,
+    // NASA: 67%-109% RPL power range; our rated point is 109%, so the
+    // floor is 67/109. Ground-lit only — no flight restart capability.
+    minThrottle: 67 / 109,
+    ignitions: 1,
   },
   {
     id: 'raptor-2',
@@ -67,6 +81,10 @@ export const ENGINES: readonly Engine[] = [
     // 1630 kg engine-only — SpaceX post, Aug 2024.
     mass: 1_630,
     vacuumOnly: false,
+    // ~50% reported minimum (SpaceX statements — estimate). Spark-torch
+    // ignition, designed for unlimited in-flight relights.
+    minThrottle: 0.5,
+    ignitions: Infinity,
   },
   {
     id: 'rl10b-2',
@@ -80,6 +98,11 @@ export const ENGINES: readonly Engine[] = [
     // 301 kg (664 lb) — Aerojet/L3Harris fact sheet.
     mass: 301,
     vacuumOnly: true, // 280:1 extendable nozzle, upper-stage only
+    // Fixed-thrust in flight (RL10B-2 is not throttleable). Multiple-
+    // restart qualified; typical mission profiles use up to 3 lights
+    // (ESTIMATE - qualification numbers are not public).
+    minThrottle: 1,
+    ignitions: 3,
   },
   {
     id: 'rutherford',
@@ -96,6 +119,11 @@ export const ENGINES: readonly Engine[] = [
     // 35 kg — Rocket Lab, "100th Rutherford Engine Build".
     mass: 35,
     vacuumOnly: false,
+    // Electric-pump feed makes deep throttling plausible; no figure is
+    // published - 20% is a LOW-CONFIDENCE ESTIMATE. Relights: the second
+    // stage engine performs restart burns; 2 lights (ESTIMATE).
+    minThrottle: 0.2,
+    ignitions: 2,
   },
 ];
 

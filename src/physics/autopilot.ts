@@ -4,7 +4,7 @@
 // test — the player can override any of it manually in flight.
 // All orbital math is relative to the sim's reference body.
 
-import { Sim } from './sim';
+import { SPOOL_TAU, Sim } from './sim';
 import { norm } from './vec2';
 import { CelestialBody, EARTH } from './bodies';
 import { stageDryMass, stageEffectiveVe, stageMassFlow, stagePropellant, stageThrustVac } from './vehicle';
@@ -140,8 +140,13 @@ export class Autopilot {
         // still in the atmosphere: a flat ascent can reach the target
         // energy while Pe is low, and that orbit decays. The plain Pe
         // threshold stays as a safety net for degenerate states.
+        // Shutdown is not instantaneous: the spool-down tail integrates
+        // to ~throttle·aMax·τ of extra Δv (min-throttle floors make this
+        // several m/s), which raises a by 2a²v·Δv/μ — anticipate it.
+        const dvTail = sim.actualThrottle * aMax * SPOOL_TAU;
+        const daTail = el.a > 0 ? (2 * el.a * el.a * speed * dvTail) / sim.body.mu : 0;
         if (
-          (el.a > 0 && el.a >= this.plan.targetRadius && el.rPeri >= minPeri) ||
+          (el.a > 0 && el.a + daTail >= this.plan.targetRadius && el.rPeri >= minPeri) ||
           el.rPeri >= this.plan.targetRadius - 2_000
         ) {
           sim.throttle = 0;

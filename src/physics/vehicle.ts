@@ -13,6 +13,13 @@ export interface Engine {
   ispVac: number; // vacuum specific impulse [s]
   mass: number; // engine dry mass [kg]
   vacuumOnly: boolean; // nozzle can't run at sea level (flow separation)
+  /** Deepest stable throttle setting [fraction of rated]. 1 = fixed
+   * thrust (no in-flight throttling). Commands below this run AT this —
+   * an engine cannot run below its floor. */
+  minThrottle: number;
+  /** Total ignitions available (first light included); Infinity for
+   * spark-ignition engines designed for unlimited restarts. */
+  ignitions: number;
 }
 
 export interface Tank {
@@ -122,6 +129,18 @@ export function massFromStage(v: Vehicle, i: number): number {
   let m = v.payloadMass;
   for (let k = i; k < v.stages.length; k++) m += stageWetMass(v.stages[k]!);
   return m;
+}
+
+/** Deepest throttle the stage can hold: all engines burn together, so a
+ * mixed stage floors at its highest per-engine floor. */
+export function stageMinThrottle(s: Stage): number {
+  return s.engines.reduce((m, g) => Math.max(m, g.engine.minThrottle), 0);
+}
+
+/** Ignitions available to the stage as a unit (engines light together, so
+ * the scarcest igniter budget governs). */
+export function stageIgnitionLimit(s: Stage): number {
+  return s.engines.reduce((m, g) => Math.min(m, g.engine.ignitions), Infinity);
 }
 
 /** Effective vacuum exhaust velocity [m/s] of a mixed-engine stage:

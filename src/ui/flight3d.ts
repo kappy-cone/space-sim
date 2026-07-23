@@ -13,7 +13,7 @@ import { Autopilot, defaultPlan } from '../physics/autopilot';
 import { BODIES, bodyById, bodyOrbitState } from '../physics/bodies';
 import { LandingAutopilot } from '../physics/landing';
 import { Sim, TOUCHDOWN_LIMITS } from '../physics/sim';
-import { stageThrustAtPressure } from '../physics/vehicle';
+import { stageIgnitionLimit, stageMinThrottle, stageThrustAtPressure } from '../physics/vehicle';
 import { machDragFactor, speedOfSound } from '../physics/atmosphere';
 import { add, norm, perp, scale, sub, vec } from '../physics/vec2';
 import { P0_SEA_LEVEL } from '../physics/constants';
@@ -592,6 +592,9 @@ export class Flight3D {
         case 'crash':
           text = `Impact at ${fmtSpeed(ev.speed)}`;
           break;
+        case 'ignitionFailed':
+          text = `⚠ Stage ${ev.stage + 1}: no ignitions left (${ev.limit} used, limit ${ev.limit})`;
+          break;
         case 'soiTransition': {
           const to = bodyById(ev.to);
           text = `Entered the ${to.name} sphere of influence`;
@@ -988,7 +991,16 @@ export class Flight3D {
 
     if (stage) {
       const full = stage.tanks.reduce((sum, t) => sum + t.propellantMass, 0);
-      this.set('prop', `Stage ${s.stageIndex + 1}: ${fmtMass(s.propellant)}`);
+      // Ignition budget and throttle floor, when the engines have either.
+      const ignLimit = stageIgnitionLimit(stage);
+      const floor = stageMinThrottle(stage);
+      const extras = [
+        isFinite(ignLimit) ? `ign ${s.ignitionsUsed[s.stageIndex] ?? 0}/${ignLimit}` : '',
+        floor > 0 && floor < 1 ? `min thr ${Math.round(floor * 100)}%` : floor >= 1 ? 'fixed thrust' : '',
+      ]
+        .filter(Boolean)
+        .join(' · ');
+      this.set('prop', `Stage ${s.stageIndex + 1}: ${fmtMass(s.propellant)}${extras ? ` · ${extras}` : ''}`);
       this.propFill.style.width = full > 0 ? `${(100 * s.propellant) / full}%` : '0%';
     } else {
       this.set('prop', 'no stages left');

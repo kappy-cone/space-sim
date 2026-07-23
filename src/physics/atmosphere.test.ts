@@ -54,6 +54,8 @@ describe('engine pressure model', () => {
     ispVac: 315,
     mass: 500,
     vacuumOnly: false,
+    minThrottle: 0.4,
+    ignitions: Infinity,
   };
 
   it('thrust interpolates linearly: endpoints exact', () => {

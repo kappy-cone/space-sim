@@ -36,7 +36,9 @@ import {
   Vehicle,
   massFromStage,
   stageDryMass,
+  stageIgnitionLimit,
   stageMassFlow,
+  stageMinThrottle,
   stagePropellant,
   stageThrustAtPressure,
 } from './vehicle';
@@ -59,6 +61,7 @@ export type SimEvent =
   | { type: 'legsDeployed'; t: number }
   | { type: 'landed'; t: number; vSpeed: number; hSpeed: number; tilt: number }
   | { type: 'soiTransition'; t: number; from: string; to: string }
+  | { type: 'ignitionFailed'; t: number; stage: number; limit: number }
   | { type: 'landingFailed'; t: number; reason: string }
   | { type: 'crash'; t: number; speed: number };
 
@@ -71,7 +74,7 @@ export const TOUCHDOWN_LIMITS = {
 
 const MAX_POWERED_DT = 0.05;
 const GIMBAL_MAX = (5 * Math.PI) / 180;
-const SPOOL_TAU = 0.4; // s — first-order thrust response (approximation)
+export const SPOOL_TAU = 0.4; // s — first-order thrust response (approximation)
 const COAST_SLEW_RATE = (5 * Math.PI) / 180; // rad/s on rails
 const KP = 0.5; // PD attitude gains: ωn ≈ 0.7 rad/s, ζ ≈ 1
 const KD = 1.4;
@@ -97,6 +100,9 @@ export class Sim {
   hasLanded = false; // made a successful landing after flight
   events: SimEvent[] = [];
   torn = new Set<string>();
+  /** Ignitions consumed per stage index (first light included). */
+  readonly ignitionsUsed: number[] = [];
+  private ignitionDenied = false;
   legsDeployed = false;
   chutesDeployed = false;
   q = 0;
@@ -302,7 +308,7 @@ export class Sim {
     while (remaining > 1e-9) {
       if (this.landed) {
         remaining -= this.stepSurface(Math.min(remaining, MAX_POWERED_DT));
-      } else if (this.burning || this.actualThrottle > 0.01 || this.altitude < atmTop) {
+      } else if ((this.burning && !this.ignitionBlocked()) || this.actualThrottle > 0.01 || this.altitude < atmTop) {
         remaining -= this.stepPowered(Math.min(remaining, MAX_POWERED_DT));
       } else {
         remaining -= this.stepRails(remaining);
@@ -435,11 +441,46 @@ export class Sim {
     return props.yCoM - this.attachedBottomY();
   }
 
+  /**
+   * Commanded throttle after engine limits. Two constraints, both real:
+   * an engine cannot run below its min-throttle floor (a command in
+   * (0, floor) runs AT the floor — the HUD's "→ actual" shows it), and
+   * lighting from spun-down consumes one ignition from the stage's
+   * budget. Out of ignitions ⇒ the stage stays dark, and the failure
+   * names the limit.
+   */
+  private commandedThrottle(): number {
+    if (!this.burning || this.ignitionBlocked()) return 0;
+    const stage = this.vehicle.stages[this.stageIndex]!;
+    if (this.actualThrottle === 0) {
+      this.ignitionsUsed[this.stageIndex] = (this.ignitionsUsed[this.stageIndex] ?? 0) + 1;
+    }
+    return Math.max(this.throttle, stageMinThrottle(stage));
+  }
+
+  /** Burning is commanded but the stage cannot light: spun down with the
+   * ignition budget spent. Emits the named failure once per attempt. */
+  private ignitionBlocked(): boolean {
+    if (!this.burning) {
+      this.ignitionDenied = false;
+      return false;
+    }
+    if (this.actualThrottle > 0) return false;
+    const stage = this.vehicle.stages[this.stageIndex]!;
+    const limit = stageIgnitionLimit(stage);
+    if ((this.ignitionsUsed[this.stageIndex] ?? 0) < limit) return false;
+    if (!this.ignitionDenied) {
+      this.ignitionDenied = true;
+      this.events.push({ type: 'ignitionFailed', t: this.state.t, stage: this.stageIndex, limit });
+    }
+    return true;
+  }
+
   /** Surface regime: burn propellant, spool engines, release on TWR > 1. */
   private stepSurface(dt: number): number {
     const stage = this.vehicle.stages[this.stageIndex];
     const p = this.body.atmosphere?.pressure(Math.max(0, this.altitude)) ?? 0;
-    const cmd = this.burning ? this.throttle : 0;
+    const cmd = this.commandedThrottle();
     this.actualThrottle += ((cmd - this.actualThrottle) / SPOOL_TAU) * dt;
     // The first-order lag is a spool *approximation*; a real shutdown ends
     // sharply on valve closure rather than decaying forever, so cut the
@@ -475,7 +516,7 @@ export class Sim {
     const atm = this.body.atmosphere;
     const p = atm ? atm.pressure(Math.max(0, this.altitude)) : 0;
 
-    const cmd = this.burning ? this.throttle : 0;
+    const cmd = this.commandedThrottle();
     this.actualThrottle += ((cmd - this.actualThrottle) / SPOOL_TAU) * dt;
     // The first-order lag is a spool *approximation*; a real shutdown ends
     // sharply on valve closure rather than decaying forever, so cut the
