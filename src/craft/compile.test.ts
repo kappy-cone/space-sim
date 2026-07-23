@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import { Autopilot, defaultPlan } from '../physics/autopilot';
 import { Sim } from '../physics/sim';
+import { Engine, Vehicle, phaseWalkReport } from '../physics/vehicle';
 import { referenceCraft, starterCrafts } from './craft';
 import { LEO_BUDGET, compile } from './compile';
 
@@ -80,6 +81,60 @@ describe('reference craft', () => {
     // Solid grain rides in the pool for stage 0.
     expect(c.vehicle.pools![0]!.fluid).toBe('solid');
     expect(c.vehicle.pools![0]!.mass).toBeCloseTo(2 * 11_766, -2);
+  });
+
+  it('phase-walk Δv matches hand Tsiolkovsky for parallel and crossfeed burns', () => {
+    // Synthetic two-pool layout: strap-on (pool 0, 5 t) + core (pool 1,
+    // 10 t), one identical engine each (F_vac 100 kN, Isp 300 s), so
+    // vₑ = g₀·300 = 2941.995 m/s and ṁ = F/vₑ per engine. Payload 1 t,
+    // sepMass [1 t, 0.5 t] ⇒ liftoff mass 17.5 t.
+    const eng: Engine = {
+      id: 'tst', name: 'Test 100kN', propellant: 'kerolox',
+      thrustSL: 90_000, thrustVac: 100_000, ispSL: 270, ispVac: 300,
+      mass: 500, vacuumOnly: false, source: 'synthetic test engine',
+      throttleable: true, minThrottle: 0.4, ignitions: Infinity,
+      gimbalDeg: 5, expansionRatio: 20, maxAmbientPressure: Infinity,
+      ullageImmune: false,
+    };
+    const base: Vehicle = {
+      stages: [{ engines: [{ engine: eng, count: 2 }], tanks: [] }, { engines: [{ engine: eng, count: 1 }], tanks: [] }],
+      payloadMass: 1_000,
+      cd: 0.5, area: 10,
+      pools: [{ fluid: 'kerolox', mass: 5_000 }, { fluid: 'kerolox', mass: 10_000 }],
+      sepMass: [1_000, 500],
+      strapOn: [true, false],
+      phases: [], // set per case below
+    };
+    const ve = 2941.995;
+    // Plain parallel: core burns its OWN pool during phase 0, so 5 t of
+    // core propellant is spent at heavy liftoff mass:
+    //   Δv = vₑ·[ln(17500/7500) + ln(6500/1500)]
+    const parallel = phaseWalkReport({
+      ...base,
+      phases: [
+        { groups: [{ engines: [{ engine: eng, count: 1 }], drain: [0], stage: 0 }, { engines: [{ engine: eng, count: 1 }], drain: [1], stage: 1 }] },
+        { groups: [{ engines: [{ engine: eng, count: 1 }], drain: [1], stage: 1 }] },
+      ],
+    })!;
+    const dvParallel = parallel[0]!.deltaV + parallel[1]!.deltaV;
+    expect(dvParallel).toBeCloseTo(ve * (Math.log(17_500 / 7_500) + Math.log(6_500 / 1_500)), 0);
+    // Asparagus: the core crossfeeds the strap-on pool first, so its own
+    // pool is untouched at separation — the serial-staging ideal:
+    //   Δv = vₑ·[ln(17500/12500) + ln(11500/1500)]
+    const crossfed = phaseWalkReport({
+      ...base,
+      phases: [
+        { groups: [{ engines: [{ engine: eng, count: 1 }], drain: [0], stage: 0 }, { engines: [{ engine: eng, count: 1 }], drain: [0, 1], stage: 1 }] },
+        { groups: [{ engines: [{ engine: eng, count: 1 }], drain: [1], stage: 1 }] },
+      ],
+    })!;
+    const dvCrossfed = crossfed[0]!.deltaV + crossfed[1]!.deltaV;
+    expect(dvCrossfed).toBeCloseTo(ve * (Math.log(17_500 / 12_500) + Math.log(11_500 / 1_500)), 0);
+    // Crossfeed buys real Δv on the same hardware.
+    expect(dvCrossfed - dvParallel).toBeGreaterThan(150);
+    // Both engines share the strap-on pool under crossfeed: phase 0 is
+    // twice as fast as the plain-parallel strap-on burn.
+    expect(crossfed[0]!.burnTime).toBeCloseTo(parallel[0]!.burnTime / 2, 3);
   });
 
   it('reaches a stable orbit under the autopilot (full pipeline)', () => {

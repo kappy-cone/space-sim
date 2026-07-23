@@ -296,3 +296,67 @@ export function stageReport(v: Vehicle, i: number): StageReport {
 export function totalDeltaV(v: Vehicle): number {
   return v.stages.reduce((sum, _s, i) => sum + stageReport(v, i).deltaV, 0);
 }
+
+/** One phase of the closed-form drain walk (see phaseWalkReport). */
+export interface PhaseWalkEntry {
+  deltaV: number; // vacuum Δv over the phase [m/s]
+  burnTime: number; // full-throttle time until the trigger pool empties [s]
+  ignitionMass: number; // vehicle mass at phase start [kg]
+  burnoutMass: number; // vehicle mass when the trigger pool empties [kg]
+}
+
+/**
+ * Crossfeed/parallel-honest Δv: walk the phases draining pools exactly the
+ * way the sim does (each burn group empties the first non-empty pool in its
+ * drain-priority list — crossfed outboard pools before its own), in closed
+ * form. Within a segment the group→pool assignment is fixed, so mass flow
+ * and thrust-weighted vₑ are constant and Tsiolkovsky is exact; segments
+ * end when a drained pool empties. Phase k ends when its trigger pool k
+ * empties; separation drops sepMass[k]. Solid thrust curves scale thrust
+ * and ṁ together, so vₑ — and hence Δv — is unaffected by the curve.
+ * Returns null for serial vehicles without pool/phase plans (stageReport
+ * is already exact there).
+ */
+export function phaseWalkReport(v: Vehicle): PhaseWalkEntry[] | null {
+  if (!v.pools || !v.phases || !v.sepMass) return null;
+  const pools = v.pools.map((p) => p.mass);
+  let m = massFromStage(v, 0);
+  const out: PhaseWalkEntry[] = [];
+  for (let k = 0; k < v.stages.length; k++) {
+    const phase = v.phases[k];
+    const m0 = m;
+    let dv = 0;
+    let t = 0;
+    while (phase && (pools[k] ?? 0) > 1e-9) {
+      // The sim's pool selection: first non-empty pool in each drain list.
+      const draining = phase.groups
+        .map((g) => ({ g, pool: g.drain.find((d) => (pools[d] ?? 0) > 1e-9) ?? -1 }))
+        .filter((x) => x.pool >= 0);
+      if (draining.length === 0) break; // engineless phase: nothing can drain the trigger
+      let thrust = 0;
+      let mdotTotal = 0;
+      const mdotByPool = new Map<number, number>();
+      for (const { g, pool } of draining) {
+        const grp = g.engines[0]!;
+        const md = massFlow(grp.engine) * grp.count;
+        thrust += grp.engine.thrustVac * grp.count;
+        mdotTotal += md;
+        mdotByPool.set(pool, (mdotByPool.get(pool) ?? 0) + md);
+      }
+      const ve = thrust / mdotTotal;
+      let dt = Infinity;
+      for (const [pool, md] of mdotByPool) dt = Math.min(dt, pools[pool]! / md);
+      const burned = mdotTotal * dt;
+      dv += ve * Math.log(m / (m - burned));
+      m -= burned;
+      t += dt;
+      for (const [pool, md] of mdotByPool) pools[pool] = Math.max(0, pools[pool]! - md * dt);
+    }
+    out.push({ deltaV: dv, burnTime: t, ignitionMass: m0, burnoutMass: m });
+    // Separation: the section's dry mass leaves, plus anything stranded in
+    // its pool (an engineless phase's propellant rides down with it).
+    m -= (v.sepMass[k] ?? 0) + (pools[k] ?? 0);
+    pools[k] = 0;
+  }
+  return out;
+}

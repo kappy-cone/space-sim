@@ -45,6 +45,7 @@ import {
   StageReport,
   Vehicle,
   stageReport,
+  phaseWalkReport,
   totalDeltaV,
 } from '../physics/vehicle';
 import { partById } from './catalog';
@@ -540,7 +541,27 @@ export function compile(craft: Craft): Compiled {
   };
 
   const reports = vehicle.stages.map((_s, i) => stageReport(vehicle, i));
-  const dv = totalDeltaV(vehicle);
+  // Crossfeed/parallel honesty: overwrite the serial per-stage estimate
+  // with the closed-form phase walk (identical for serial vehicles). The
+  // SL Δv keeps its meaning via the phase's vₑ ratio, and TWR rows rescale
+  // to the walk's honest ignition/burnout masses (thrust is unchanged:
+  // twr·mass = thrust/g).
+  const phaseWalk = phaseWalkReport(vehicle);
+  if (phaseWalk) {
+    for (let i = 0; i < reports.length; i++) {
+      const r = reports[i]!;
+      const w = phaseWalk[i]!;
+      const veRatio = r.deltaV > 0 ? r.deltaVSeaLevel / r.deltaV : 0;
+      r.twrIgnition = r.ignitionMass > 0 ? (r.twrIgnition * r.ignitionMass) / w.ignitionMass : r.twrIgnition;
+      r.twrBurnout = r.burnoutMass > 0 ? (r.twrBurnout * r.burnoutMass) / w.burnoutMass : r.twrBurnout;
+      r.deltaV = w.deltaV;
+      r.deltaVSeaLevel = w.deltaV * veRatio;
+      r.burnTime = w.burnTime;
+      r.ignitionMass = w.ignitionMass;
+      r.burnoutMass = w.burnoutMass;
+    }
+  }
+  const dv = phaseWalk ? phaseWalk.reduce((s, w) => s + w.deltaV, 0) : totalDeltaV(vehicle);
   const aero = {
     full: massProperties(geometry, 0, 1),
     empty: massProperties(geometry, 0, 0),

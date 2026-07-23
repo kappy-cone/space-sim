@@ -467,6 +467,21 @@ export class Vab {
 
   private renderStaging(): void {
     const c = this.compiled;
+    // Crossfeed drain flows, straight from the compiled burn plan: pool i
+    // is crossfed when another stage's burn group lists it ahead of its
+    // own pool. Rendered as explicit arrows on both ends of the flow.
+    const fedBy = new Map<number, number[]>(); // core stage → strap-on pools it drains first
+    const feeds = new Map<number, number[]>(); // strap-on stage → core stages taking its propellant
+    for (const ph of c.vehicle.phases ?? []) {
+      for (const g of ph.groups) {
+        for (const d of g.drain) {
+          if (d === g.stage) continue;
+          if (!feeds.get(d)?.includes(g.stage)) feeds.set(d, [...(feeds.get(d) ?? []), g.stage]);
+          if (!fedBy.get(g.stage)?.includes(d)) fedBy.set(g.stage, [...(fedBy.get(g.stage) ?? []), d]);
+        }
+      }
+    }
+    const stageList = (xs: number[]): string => xs.sort((a, b) => a - b).map((x) => `Stage ${x + 1}`).join(', ');
     const rows = c.stages
       .map((cs, i) => {
         const parts = cs.partIds.map((id) => this.craft.parts[id]).filter(Boolean) as CraftPart[];
@@ -478,14 +493,18 @@ export class Vab {
             return `<div class="stage-part" data-part="${p.id}">${n > 1 ? `${n}× ` : ''}${def.name}</div>`;
           })
           .join('');
+        const flows: string[] = [];
+        if (feeds.has(i)) flows.push(`<div class="drain-flow out">propellant ⟶ ${stageList(feeds.get(i)!)} (drained first)</div>`);
+        if (fedBy.has(i)) flows.push(`<div class="drain-flow in">⟵ drains ${stageList(fedBy.get(i)!)} before own tanks</div>`);
         return `<div class="stage-row" data-i="${i}">
           <div class="stage-row-head">
-            <b>Stage ${i + 1}${cs.strapOn ? (cs.crossfeed ? ' ⇉ strap-on · crossfeeds the core' : ' ⇉ strap-on, parallel burn') : ''}</b>
+            <b>Stage ${i + 1}${cs.strapOn ? ' ⇉ strap-on, parallel burn' : ''}</b>
             <span>
               <button class="mini" data-move="up" data-i="${i}" ${i === 0 ? 'disabled' : ''}>▲</button>
               <button class="mini" data-move="down" data-i="${i}" ${i === c.stages.length - 1 ? 'disabled' : ''}>▼</button>
             </span>
           </div>
+          ${flows.join('')}
           <details>
             <summary class="stage-row-body">${engines || 'no engines'} · ${parts.length} parts</summary>
             ${items}
