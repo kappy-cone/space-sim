@@ -31,6 +31,7 @@ import {
 } from '../gl/mat4';
 import { finMesh, groundCapMesh, moonColor, segmentsMesh, sphereMesh, terrainColor, wingMesh } from '../gl/mesh';
 import { planeStability } from '../physics/massmodel';
+import { SITES } from '../physics/sites';
 import { Renderer } from '../gl/renderer';
 import { fmtDistance, fmtMass, fmtSpeed, fmtTime } from './format';
 
@@ -116,6 +117,14 @@ export class Flight3D {
   ) {
     this.sim = new Sim(compiled.vehicle);
     this.ap = new Autopilot(defaultPlan(targetAltitude, this.sim.body));
+    if (compiled.vehicle.planeAero) {
+      // Planes start on the runway, nose on the horizon; arrows pitch
+      // from there (rotation is what lifts the nose at Vr). The ascent
+      // autopilot is a rocket gravity-turn program — planes fly manual.
+      this.manualPitch = Math.PI / 2;
+      this.sim.attitude = { mode: 'pitch', angle: Math.PI / 2 };
+      this.autopilotOn = false;
+    }
 
     // Flatten the craft to renderable instances with burn-order indices.
     const burnIndex = new Map<string, number>();
@@ -350,7 +359,7 @@ export class Flight3D {
     this.launchBtn.textContent = 'Launch';
     this.launchBtn.onclick = () => this.launch();
     this.apBtn = document.createElement('button');
-    this.apBtn.textContent = 'Autopilot: on';
+    this.apBtn.textContent = `Autopilot: ${this.autopilotOn ? 'on' : 'off'}`;
     this.apBtn.onclick = () => this.toggleAutopilot();
     const stageBtn = document.createElement('button');
     stageBtn.textContent = 'Stage (space)';
@@ -828,6 +837,24 @@ export class Flight3D {
           1,
           true,
         );
+      }
+    }
+
+    // Runways (rotate with the body): a 4 km asphalt strip along the
+    // surface tangent up close, a cyan beacon at map scales.
+    for (const site of SITES) {
+      if (site.type !== 'runway' || site.body !== s.body.id) continue;
+      const a = site.angle + s.body.rotationRate * s.state.t;
+      const w = this.toWorld(s.body.radius * Math.cos(a), s.body.radius * Math.sin(a));
+      if (this.camera.dist < 30_000) {
+        const model = multiply(
+          multiply(translation(w.x, w.y, w.z), rotationZ(a + Math.PI / 2)),
+          scalingXYZ(site.halfLength ?? 2_000, 0.3, 15),
+        );
+        this.renderer.draw('padDisc', model, [0.2, 0.21, 0.24]);
+      } else {
+        const bScale = this.camera.dist * 0.012;
+        this.renderer.draw('pad', multiply(translation(w.x, w.y, w.z), scaling(bScale)), [0.4, 0.8, 1.0], 1, true);
       }
     }
 

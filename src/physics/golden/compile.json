@@ -572,5 +572,170 @@
    "AJ10-190 (OMS) separates at sea level (limit 4.7 kPa) — it will be DESTROYED on a pad start.",
    "Aerodynamically unstable: CoP 1.2 calibers ahead of CoM — it will flip at max-Q unless gimbal authority holds it. Move fins aft or mass forward."
   ]
+ },
+ "Gull Trainer": {
+  "totalDeltaV": 14670.818889691393,
+  "reports": [
+   {
+    "deltaV": 14670.818889691393,
+    "deltaVSeaLevel": 14670.818889691393,
+    "twrIgnition": 0.5780464071198929,
+    "twrBurnout": 0.7249845340831162,
+    "ignitionMass": 21204.606254158458,
+    "burnoutMass": 16906.90750404762,
+    "burnTime": 2317.8560473984194,
+    "propellantMass": 4297.698750110837
+   }
+  ],
+  "aero": {
+   "full": {
+    "cnAlpha": 0.6373553719008264,
+    "yCoP": 8.753665283540805,
+    "staticMarginCal": -1.342068882363523
+   },
+   "empty": {
+    "cnAlpha": 0.6373553719008264,
+    "yCoP": 8.753665283540805,
+    "staticMarginCal": -1.3535278431542184
+   }
+  },
+  "drag": {
+   "cdFaired": [
+    0.4
+   ],
+   "cdBare": [
+    0.4
+   ],
+   "areaFaired": [
+    3.8013271108436504
+   ],
+   "areaBare": [
+    3.8013271108436504
+   ]
+  },
+  "sepMass": [
+   16906.90750404762
+  ],
+  "strapOn": [
+   false
+  ],
+  "pools": [
+   {
+    "fluid": "jetfuel",
+    "mass": 4297.698750110837
+   }
+  ],
+  "finControlPerQ": 0,
+  "warnings": []
+ },
+ "Stratoliner": {
+  "totalDeltaV": 62909.39442727913,
+  "reports": [
+   {
+    "deltaV": 62909.39442727913,
+    "deltaVSeaLevel": 62909.39442727913,
+    "twrIgnition": 0.4430535693594094,
+    "twrBurnout": 1.1701889427690786,
+    "ignitionMass": 55330.764978738305,
+    "burnoutMass": 20949.17497785161,
+    "burnTime": 9271.424189593678,
+    "propellantMass": 34381.590000886696
+   }
+  ],
+  "aero": {
+   "full": {
+    "cnAlpha": 2.0355555555555553,
+    "yCoP": 14.253857350800581,
+    "staticMarginCal": -2.636572314886118
+   },
+   "empty": {
+    "cnAlpha": 2.0355555555555553,
+    "yCoP": 14.253857350800581,
+    "staticMarginCal": -2.9622953617758196
+   }
+  },
+  "drag": {
+   "cdFaired": [
+    0.4
+   ],
+   "cdBare": [
+    0.4
+   ],
+   "areaFaired": [
+    15.975077183320442
+   ],
+   "areaBare": [
+    15.975077183320442
+   ]
+  },
+  "sepMass": [
+   20949.17497785161
+  ],
+  "strapOn": [
+   false
+  ],
+  "pools": [
+   {
+    "fluid": "jetfuel",
+    "mass": 34381.590000886696
+   }
+  ],
+  "finControlPerQ": 0,
+  "warnings": []
+ },
+ "Silver Dart": {
+  "totalDeltaV": 23840.233263276372,
+  "reports": [
+   {
+    "deltaV": 23840.233263276372,
+    "deltaVSeaLevel": 23840.233263276372,
+    "twrIgnition": 0.3407240001358032,
+    "twrBurnout": 1.2844073685804474,
+    "ignitionMass": 143093.73152200208,
+    "burnoutMass": 37959.50552076071,
+    "burnTime": 3953.819536934637,
+    "propellantMass": 105134.22600124138
+   }
+  ],
+  "aero": {
+   "full": {
+    "cnAlpha": 2.0355555555555553,
+    "yCoP": 28.45145560407569,
+    "staticMarginCal": -4.933628919879656
+   },
+   "empty": {
+    "cnAlpha": 2.0355555555555553,
+    "yCoP": 28.45145560407569,
+    "staticMarginCal": -5.343408924274901
+   }
+  },
+  "drag": {
+   "cdFaired": [
+    0.4
+   ],
+   "cdBare": [
+    0.4
+   ],
+   "areaFaired": [
+    16.045998637475222
+   ],
+   "areaBare": [
+    16.045998637475222
+   ]
+  },
+  "sepMass": [
+   37959.50552076069
+  ],
+  "strapOn": [
+   false
+  ],
+  "pools": [
+   {
+    "fluid": "jetfuel",
+    "mass": 105134.22600124138
+   }
+  ],
+  "finControlPerQ": 0,
+  "warnings": []
  }
 }

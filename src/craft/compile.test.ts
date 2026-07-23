@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { Autopilot, defaultPlan } from '../physics/autopilot';
 import { Sim } from '../physics/sim';
 import { Engine, Vehicle, phaseWalkReport } from '../physics/vehicle';
+import { planeStability } from '../physics/massmodel';
 import { referenceCraft, starterCrafts } from './craft';
 import { LEO_BUDGET, compile } from './compile';
 
@@ -41,12 +42,33 @@ describe('reference craft', () => {
     const suborbitalOk = new Set(['Test Lander', 'Moon Hopper']);
     for (const s of starterCrafts()) {
       const c = compile(s.craft);
-      if (nearNeutralOk.has(s.name)) {
+      if (c.vehicle.planeAero) {
+        // Plane starters: flyable static margin, real trim authority,
+        // and a stall speed a 2 km runway can reach.
+        const pa = c.vehicle.planeAero;
+        const st = planeStability(c.aero.full, c.geometry.refArea, pa);
+        expect(st.staticMarginPctMAC, s.name).toBeGreaterThan(2);
+        expect(st.staticMarginPctMAC, s.name).toBeLessThan(30);
+        let elevPerRad = 0;
+        let W = c.aero.full.cnAlpha > 0 ? c.aero.full.cnAlpha * c.geometry.refArea : 0;
+        let sumSCl = 0;
+        for (const sf of pa.surfaces) {
+          W += sf.a * (sf.downwash ?? 1) * sf.S;
+          if (sf.tau) elevPerRad += sf.a * sf.tau * sf.S * (sf.y - c.aero.full.yCoM);
+          sumSCl += sf.S * sf.clMax;
+        }
+        const trimAlpha = Math.abs((elevPerRad * pa.elevMax) / (W * (c.aero.full.yCoM - st.yNP)));
+        expect((trimAlpha * 180) / Math.PI, s.name).toBeGreaterThan(8);
+        const m0 = c.reports[0]!.ignitionMass;
+        const stallSpeed = Math.sqrt((2 * m0 * 9.798) / (1.225 * sumSCl));
+        expect(stallSpeed, s.name).toBeLessThan(90);
+        expect(c.vehicle.gear, s.name).toBeDefined();
+      } else if (nearNeutralOk.has(s.name)) {
         expect(c.aero.full.staticMarginCal, s.name).toBeGreaterThan(-1.6);
       } else {
         expect(c.aero.full.staticMarginCal, s.name).toBeGreaterThan(0);
       }
-      if (!suborbitalOk.has(s.name)) {
+      if (!suborbitalOk.has(s.name) && !c.vehicle.planeAero) {
         expect(c.totalDeltaV, s.name).toBeGreaterThan(LEO_BUDGET);
       }
       expect(

@@ -165,6 +165,51 @@ export function starterCrafts(): { name: string; craft: Craft }[] {
   hopper.P('eng', 'e-aj10', 'tank', { kind: 'below' });
   hopper.P('legs', 'leg-s', 'tank', { kind: 'radial', angle: 0.3, y: 1.1 }, 4);
 
+  // ---- plane class: three starters, one per propulsion/wing niche.
+  // Streamlined: nose cone forward, jet(s) aft, wings mid-fuselage
+  // tuned for a mid-band static margin, gear on the belly. (The ramjet
+  // has no starter ON PURPOSE — the RJ43's testbed, the X-7, was
+  // air-launched, which is exactly what the release pylon is for.)
+
+  // Gull Trainer — one turbofan, big wing, fixed gear: slow, floaty,
+  // forgiving. The 20×-Isp demonstrator: hours of air on 4 t of fuel.
+  const gull = make('Gull Trainer');
+  gull.P('root', 'nose-12', null, { kind: 'below' });
+  gull.P('fus', 'jf12', 'root', { kind: 'below' }, 1, 5);
+  gull.P('eng', 'e-cfm56', 'fus', { kind: 'below' });
+  gull.P('wing', 'wing-swept', 'fus', { kind: 'radial', angle: 0, y: 3.6 });
+  gull.P('tail', 'tailplane', 'fus', { kind: 'radial', angle: 0, y: 0.3 });
+  // Retractable gear even on the trainer: a CFM56 at full throttle
+  // passes the fixed gear's 8 kPa limit in under 30 s — fixed gear is
+  // for builds that CAN'T outrun it (sailplane-wing airframes).
+  gull.P('gear', 'gear-retract', 'fus', { kind: 'radial', angle: Math.PI, y: 1.5 });
+
+  // Stratoliner — the transport workhorse: twin turbofans, 34 t of
+  // fuel, retractable gear. Ferry/cargo profile to M0.9 / 12 km.
+  const strato = make('Stratoliner');
+  strato.P('root', 'nose-24', null, { kind: 'below' });
+  strato.P('fus', 'jf24', 'root', { kind: 'below' }, 1, 10);
+  strato.P('eng', 'e-cfm56', 'fus', { kind: 'below' }, 2);
+  strato.P('wing', 'wing-swept', 'fus', { kind: 'radial', angle: 0, y: 6.4 });
+  strato.P('tail', 'tailplane', 'fus', { kind: 'radial', angle: 0, y: 0.4 });
+  strato.P('gear', 'gear-retract', 'fus', { kind: 'radial', angle: Math.PI, y: 2 });
+
+  // Silver Dart — Concorde-proportioned supersonic cruiser: six
+  // afterburning J79s in mid-ship pods (tail-stacked engines would drag
+  // the CG aft of the delta's neutral point — Concorde managed CG by
+  // pumping fuel; we manage it by layout), the wet delta far aft with
+  // elevons for trim (no tailplane — the delta trims itself), M2 dash.
+  const dart = make('Silver Dart');
+  dart.P('root', 'nose-24', null, { kind: 'below' });
+  dart.P('fus', 'jf24', 'root', { kind: 'below' }, 1, 14);
+  dart.P('eng', 'e-j79', 'fus', { kind: 'radial', angle: 0.3, y: 4 }, 6);
+  dart.P('wing', 'wing-delta', 'fus', { kind: 'radial', angle: 0, y: 0.2 });
+  dart.P('gear', 'gear-retract', 'fus', { kind: 'radial', angle: Math.PI, y: 3 });
+
+  gull.craft.vehicleClass = 'plane';
+  strato.craft.vehicleClass = 'plane';
+  dart.craft.vehicleClass = 'plane';
+
   return [
     { name: 'Reference Orbiter', craft: referenceCraft() },
     { name: 'Heavy Lifter', craft: heavy.craft },
@@ -172,6 +217,9 @@ export function starterCrafts(): { name: string; craft: Craft }[] {
     { name: 'Moon Freighter', craft: freighter.craft },
     { name: 'Test Lander', craft: lander.craft },
     { name: 'Moon Hopper', craft: hopper.craft },
+    { name: 'Gull Trainer', craft: gull.craft },
+    { name: 'Stratoliner', craft: strato.craft },
+    { name: 'Silver Dart', craft: dart.craft },
   ];
 }
 

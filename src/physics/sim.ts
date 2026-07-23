@@ -27,6 +27,7 @@
 // an exact identity (trapezoid-accumulated) — see the validation suite.
 
 import { CelestialBody, EARTH, bodyById, bodyOrbitState, childrenOf } from './bodies';
+import { SITES, Site, defaultSite } from './sites';
 import { FlightState, rk4Step } from './integrator';
 import { Elements, elementsFromState, propagateKepler } from './kepler';
 import { MassProperties, massProperties, synthesizeGeometry } from './massmodel';
@@ -86,9 +87,23 @@ export const TOUCHDOWN_LIMITS = {
   legs: { vSpeed: 6, hSpeed: 2, tilt: (15 * Math.PI) / 180 }, // F9-class gear
   chute: { vSpeed: 8, hSpeed: 4, tilt: (30 * Math.PI) / 180 }, // capsule under canopy
   none: { vSpeed: 3, hSpeed: 1, tilt: (8 * Math.PI) / 180 }, // engine-bell touchdown
+  // Runway: sink rate from the 10 ft/s landing-gear design condition
+  // (14 CFR 25.473); ground speed is a gear rating (ESTIMATE); tilt is
+  // measured against the RUNWAY (horizontal), not the vertical.
+  runway: { vSpeed: 3, hSpeed: 120, tilt: (15 * Math.PI) / 180 },
 };
 
 const MAX_POWERED_DT = 0.05;
+// Ground roll (plane class). Rolling/braking friction: dry concrete
+// class values (Raymer, Aircraft Design 6e, §17.9). Rotation is
+// kinematic: pitch slews at ≤3°/s and clamps at 12° (tail-strike
+// geometry stand-in — ESTIMATE). Gear strut clearance is a contact
+// approximation, not modeled suspension.
+const MU_ROLL = 0.03;
+const MU_BRAKE = 0.4;
+const ROT_MAX = (12 * Math.PI) / 180;
+const ROT_SLEW = (3 * Math.PI) / 180;
+const GEAR_STRUT = 1.2;
 const GIMBAL_MAX = (5 * Math.PI) / 180;
 export const SPOOL_TAU = 0.4; // s — first-order thrust response (approximation)
 /** Freefall time after which tank propellant is no longer settled [s] —
@@ -160,6 +175,16 @@ export class Sim {
   gearDeployed = false;
   /** Gear torn off by exceeding the gear-down q limit. */
   gearFailed = false;
+  // Ground-roll state (plane class) — two scalars OUTSIDE FlightState
+  // (the frozen 3-DOF vector is untouched): surface-relative ground
+  // speed and the surface-fixed angle rolled from the start site.
+  groundSpeed = 0;
+  private rollAngle = 0;
+  /** Current ground pitch rotation [rad, 0..ROT_MAX] (nose-up). */
+  rotAngle = 0;
+  /** Landing rollout in progress (touched down, not yet stopped). */
+  private rolloutActive = false;
+  private site?: Site;
   q = 0;
   aoa = 0;
   mach = 0;
@@ -182,9 +207,11 @@ export class Sim {
 
   private geom;
 
-  constructor(vehicle: Vehicle, body: CelestialBody = EARTH) {
+  constructor(vehicle: Vehicle, body: CelestialBody = EARTH, site?: Site) {
     this.vehicle = vehicle;
     this.body = body;
+    this.site = site ?? defaultSite(!!vehicle.planeAero);
+    if (this.site.body === body.id) this.restAngle0 = this.site.angle;
     this.geom = vehicle.geometry ?? synthesizeGeometry(vehicle.stages, vehicle.payloadMass);
     this.state = { r: vec(0, 0), v: vec(0, 0), theta: 0, omega: 0, m: massFromStage(vehicle, 0), t: 0 };
     this.pools = vehicle.pools
@@ -197,7 +224,8 @@ export class Sim {
     // Fixed gear starts (and stays) down; retractable starts down on the
     // ground (you don't spawn gear-up on the pad/runway).
     this.gearDeployed = vehicle.gear !== undefined;
-    this.pinToSurface(); // launch pad: equator, +x, nose up
+    if (vehicle.planeAero) this.pinToRolling(); // runway: horizontal, nose downrange
+    else this.pinToSurface(); // launch pad: equator, +x, nose up
   }
 
   /** Propellant reachable by the current phase (own pool + crossfed). */
@@ -488,7 +516,9 @@ export class Sim {
     let remaining = dt;
     while (remaining > 1e-9) {
       if (this.landed) {
-        remaining -= this.stepSurface(Math.min(remaining, MAX_POWERED_DT));
+        remaining -= this.vehicle.planeAero
+          ? this.stepRolling(Math.min(remaining, MAX_POWERED_DT))
+          : this.stepSurface(Math.min(remaining, MAX_POWERED_DT));
       } else if ((this.burning && !this.ignitionBlocked()) || this.actualThrottle > 0.01 || this.altitude < atmTop) {
         remaining -= this.stepPowered(Math.min(remaining, MAX_POWERED_DT));
       } else {
@@ -623,6 +653,29 @@ export class Sim {
   private comAboveGroundStatic(): number {
     const props = massProperties(this.geom, this.stageIndex, this.poolFills(), this.torn);
     return props.yCoM - this.attachedBottomY();
+  }
+
+  /** CoM height above the runway resting horizontally on gear: fuselage
+   * radius + strut clearance (contact approximation, not suspension). */
+  private groundClearance(): number {
+    let r = 0.6;
+    for (const p of this.geom.parts) {
+      if (p.stage >= this.stageIndex && !this.torn.has(p.partId) && p.lateral < 0.01) r = Math.max(r, p.radius);
+    }
+    return r + GEAR_STRUT;
+  }
+
+  /** Pin the rolling vehicle to the rotating surface: position from the
+   * rolled angle, velocity = co-rotation + ground speed downrange, body
+   * horizontal nose-downrange plus the current rotation. */
+  private pinToRolling(): void {
+    const a = this.restAngle0 + this.rollAngle + this.body.rotationRate * this.state.t;
+    const up = fromAngle(a);
+    const rMag = this.body.radius + this.groundClearance();
+    this.state.r = scale(up, rMag);
+    this.state.v = scale(perp(up), this.body.rotationRate * rMag + this.groundSpeed);
+    this.state.theta = a + Math.PI / 2 - this.rotAngle;
+    this.state.omega = this.body.rotationRate;
   }
 
   /**
@@ -940,6 +993,98 @@ export class Sim {
     if (thrust > weight) {
       this.landed = false;
       this.events.push({ type: 'liftoff', t: this.state.t });
+    }
+    return dt;
+  }
+
+  /**
+   * Ground-roll regime (plane class): 1-D along-surface dynamics in the
+   * rotating frame — takeoff roll, rotation, liftoff, and landing
+   * rollout. Semi-implicit Euler on (u, rollAngle); attitude is
+   * kinematic like the pad pin (θ set, ω not integrated). Aero comes
+   * from the SAME surface force function the flight derivative uses, so
+   * the liftoff seam is continuous by construction.
+   */
+  private stepRolling(dt: number): number {
+    const atm = this.body.atmosphere;
+    const alt = Math.max(0, this.altitude);
+    const p = atm ? atm.pressure(alt) : 0;
+    const rho = atm ? atm.density(alt) : 0;
+    const u = this.groundSpeed;
+    const mach = atm && u > 0.1 ? u / speedOfSound(alt) : 0;
+
+    const cmd = this.commandedThrottle();
+    this.actualThrottle += ((cmd - this.actualThrottle) / SPOOL_TAU) * dt;
+    if (this.actualThrottle < 0.01 && cmd === 0) this.actualThrottle = 0;
+    const { thrust, drained } = this.applyBurns(dt, p, { rho, mach });
+    this.thrustNow = thrust;
+    this.state.m -= drained;
+    this.coastKeeping(dt, this.actualThrottle > 0.05);
+    this.state.t += dt;
+
+    // Rotation: slew the nose toward the commanded pitch, clamped to the
+    // tail-strike limit. (Nosewheel steering is a planar no-op — there
+    // is no lateral runway axis to steer on.)
+    const a = this.restAngle0 + this.rollAngle + this.body.rotationRate * this.state.t;
+    const wantRot = Math.max(0, Math.min(ROT_MAX, wrapPi(a + Math.PI / 2 - this.targetAngle())));
+    const dRot = Math.max(-ROT_SLEW * dt, Math.min(ROT_SLEW * dt, wantRot - this.rotAngle));
+    this.rotAngle = Math.max(0, Math.min(ROT_MAX, this.rotAngle + dRot));
+
+    // Aero at the roll state.
+    const up = fromAngle(a);
+    const tHat = perp(up);
+    const q = 0.5 * rho * u * u;
+    const props = this.massProps;
+    let lift = 0;
+    let dragSurf = 0;
+    if (u > 0.1 && (this.vehicle.planeAero?.surfaces.length ?? 0) > 0) {
+      const air = scale(tHat, u);
+      const axis = fromAngle(a + Math.PI / 2 - this.rotAngle);
+      const pf = this.planeSurfaceForces(air, u, q, axis, props.yCoM, 0, 0, 1);
+      lift = dot(pf.F, up);
+      dragSurf = -dot(pf.F, tHat);
+    }
+    const drag = this.vehicle.drag;
+    const di = Math.min(this.stageIndex, (drag?.cdFaired.length ?? 1) - 1);
+    const cdEff = drag ? (this.fairingsJettisoned ? drag.cdBare[di]! : drag.cdFaired[di]!) : this.vehicle.cd;
+    const areaEff = drag ? (this.fairingsJettisoned ? drag.areaBare[di]! : drag.areaFaired[di]!) : this.vehicle.area;
+    const gearDragCdA = this.gearDeployed && !this.gearFailed && this.vehicle.gear ? this.vehicle.gear.dragCdA : 0;
+    const dragBody = q * (cdEff * areaEff + gearDragCdA) * machDragFactor(mach);
+
+    const rMag = norm(this.state.r);
+    const weight = (this.state.m * this.body.mu) / (rMag * rMag);
+    const vertical = lift + thrust * Math.sin(this.rotAngle);
+
+    // Readouts (before any liftoff so the HUD sees the roll state).
+    this.q = q;
+    this.mach = mach;
+    this.aoa = -this.rotAngle; // CCW convention: nose above the eastward flow is negative
+    this.checkStructure();
+
+    if (vertical >= weight) {
+      // Wheels unloaded: hand the exact kinematic state to free flight.
+      this.pinToRolling();
+      this.state.omega = 0;
+      this.landed = false;
+      this.rolloutActive = false;
+      this.events.push({ type: 'liftoff', t: this.state.t });
+      return dt;
+    }
+
+    // Wheel forces. Brakes come on automatically at cut throttle (the
+    // stopping half of every rollout; no separate brake control).
+    const normalForce = weight - vertical;
+    const braking = this.vehicle.gear?.brakes && this.throttle < 0.05 && u > 0 ? MU_BRAKE : 0;
+    const acc = (thrust * Math.cos(this.rotAngle) - dragBody - dragSurf - (MU_ROLL + braking) * normalForce) / this.state.m;
+    this.groundSpeed = Math.max(0, u + acc * dt);
+    this.rollAngle += this.groundSpeed / rMag * dt;
+    this.pinToRolling();
+
+    // Rollout complete: stopped on the wheels.
+    if (this.rolloutActive && this.groundSpeed < 0.5) {
+      this.rolloutActive = false;
+      this.hasLanded = true;
+      this.throttle = 0;
     }
     return dt;
   }
@@ -1340,16 +1485,56 @@ export class Sim {
   private checkContact(): void {
     if (this.landed || this.crashed) return;
     if (this.altitude > this.geom.length * 2 + 200) return; // cheap far guard
-    if (this.radarAltitude > 0) return;
+    // Planes touch wheels-first: contact at strut height with the gear
+    // down and intact; everything else at hull contact.
+    const gearOk = !!this.vehicle.planeAero && !!this.vehicle.gear && this.gearDeployed && !this.gearFailed;
+    if (this.radarAltitude > (gearOk ? GEAR_STRUT : 0)) return;
     if (this.vSpeed < 0.1) return; // ascending or at rest at release — not contact
 
     const vs = this.vSpeed;
     const hs = this.hSpeed;
+    const deg = (r: number) => ((r * 180) / Math.PI).toFixed(1);
+
+    // Runway touchdown: gear down INSIDE a runway window → rollout, not
+    // freeze. Tilt is judged against the RUNWAY (horizontal), and the
+    // ground speed against the gear rating, not a vertical-lander limit.
+    const upA = Math.atan2(this.state.r.y, this.state.r.x);
+    const surfA = upA - this.body.rotationRate * this.state.t;
+    const runway = gearOk
+      ? SITES.find(
+          (s) =>
+            s.type === 'runway' &&
+            s.body === this.body.id &&
+            Math.abs(wrapPi(surfA - s.angle)) * this.body.radius <= (s.halfLength ?? 0),
+        )
+      : undefined;
+    if (runway) {
+      const lim = TOUCHDOWN_LIMITS.runway;
+      const tiltRunway = Math.abs(wrapPi(this.state.theta - (upA + Math.PI / 2)));
+      const failures: string[] = [];
+      if (vs > lim.vSpeed) failures.push(`sink rate ${vs.toFixed(1)} m/s, limit ${lim.vSpeed.toFixed(1)}`);
+      if (hs > lim.hSpeed) failures.push(`ground speed ${hs.toFixed(0)} m/s, gear rating ${lim.hSpeed.toFixed(0)}`);
+      if (tiltRunway > lim.tilt) failures.push(`attitude ${deg(tiltRunway)}° off the runway, limit ${deg(lim.tilt)}°`);
+      if (failures.length === 0) {
+        this.landed = true;
+        this.restAngle0 = runway.angle;
+        this.rollAngle = wrapPi(surfA - runway.angle);
+        this.groundSpeed = hs;
+        this.rotAngle = Math.max(0, Math.min(ROT_MAX, wrapPi(upA + Math.PI / 2 - this.state.theta)));
+        this.rolloutActive = true; // hasLanded when the rollout stops
+        this.pinToRolling();
+        this.events.push({ type: 'landed', t: this.state.t, vSpeed: vs, hSpeed: hs, tilt: tiltRunway });
+      } else {
+        this.crashed = true;
+        this.events.push({ type: 'landingFailed', t: this.state.t, reason: failures.join('; ') });
+      }
+      return;
+    }
+
     const tilt = this.tilt;
     const footprint = this.legFootprint();
     const mode = footprint > 0 ? 'legs' : this.activeChutes().length > 0 ? 'chute' : 'none';
     const lim = TOUCHDOWN_LIMITS[mode];
-    const deg = (r: number) => ((r * 180) / Math.PI).toFixed(1);
 
     const failures: string[] = [];
     if (vs > lim.vSpeed) failures.push(`vertical speed ${vs.toFixed(1)} m/s, limit ${lim.vSpeed.toFixed(1)}`);

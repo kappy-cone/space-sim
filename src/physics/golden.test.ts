@@ -88,10 +88,30 @@ function runLanding(): Sample[] {
   return out;
 }
 
+/** Plane takeoff + climb: the Stratoliner at full throttle, scripted
+ * rotation at 75 m/s, 60 s of flight — pins the ground-roll regime, the
+ * liftoff seam, and the surface-force model in one series. */
+function runPlaneTakeoff(): Sample[] {
+  const starter = starterCrafts().find((s) => s.name === 'Stratoliner')!;
+  const sim = new Sim(compile(starter.craft).vehicle);
+  sim.attitude = { mode: 'pitch', angle: Math.PI / 2 };
+  sim.throttle = 1;
+  const out: Sample[] = [sample(sim)];
+  for (let tick = 1; tick <= 1_200; tick++) {
+    if (sim.groundSpeed > 75) sim.attitude = { mode: 'pitch', angle: Math.PI / 2 - (10 * Math.PI) / 180 };
+    sim.step(0.05);
+    if (tick % 40 === 0) out.push(sample(sim));
+    if (sim.crashed) break;
+  }
+  out.push(sample(sim));
+  return out;
+}
+
 const RUNS: { name: string; run: () => Sample[] }[] = [
   { name: 'ascent', run: runAscent },
   { name: 'heavy-ascent', run: runHeavyAscent },
   { name: 'landing', run: runLanding },
+  { name: 'plane-takeoff', run: runPlaneTakeoff },
 ];
 
 const fixturePath = (name: string): string =>
