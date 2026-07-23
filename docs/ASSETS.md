@@ -3,15 +3,28 @@
 A concrete plan for bringing external 3-D art into the sim, with effort,
 the dependency question, and a recommendation.
 
-## Status: Option A is now implemented
+## Status: Option A is implemented and in use
 
 The zero-dep `.glb` mesh loader (`src/gl/glb.ts`, tested in `glb.test.ts`)
-is built, and a real **CC0 Quaternius jet** ("Spitfire" from the Ultimate
-Spaceships pack) flies the dogfight — team-tinted, loaded async with a
-procedural fallback. Provenance: `public/models/CREDITS.md`; the source
-OBJ was converted with the build-time `scripts/obj2glb.cjs`. No runtime
-dependency was added. The sections below are the original scoping that
-led to that choice, kept for the remaining options.
+is built and driving real CC0 art. No runtime dependency was added.
+Provenance for every model: `public/models/CREDITS.md`.
+
+- **Aircraft:** a CC0 **Quaternius Spitfire** (Ultimate Spaceships pack)
+  flies the dogfight, team-tinted, async-loaded with a procedural
+  fallback. That pack ships OBJ, converted by the build-time
+  `scripts/obj2glb.cjs`.
+- **Bases:** CC0 **Kenney Space Kit** structures (hangars, a girder
+  control block, a satellite dish) stand at the Meridian dogfight base.
+  The Space Kit ships `.glb` directly — no conversion. Kenney colours
+  parts with material `baseColorFactor`, so the loader was extended to
+  bake a material's flat base colour per-primitive (still no textures,
+  no PBR).
+
+Remaining, if wanted (all still zero-new-dep via the same loader):
+Kenney structures at the Cape pad / ground station in the flight view;
+ship models for registry satellites in the world viewer; more geography
+detail. The sections below are the original scoping, kept for the
+Option B/C tradeoffs.
 
 ## The one real blocker: it breaks the tiny-deps rule
 

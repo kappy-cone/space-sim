@@ -108,6 +108,18 @@ describe('glb loader', () => {
     expect([...mesh.colors!]).toEqual([1, 0, 0, 0, 1, 0, 0, 0, 1]); // rgb, no alpha
   });
 
+  it('bakes a material baseColorFactor into vertex colors when there is no COLOR_0', () => {
+    const json = {
+      ...TRI_GLTF,
+      materials: [{ pbrMetallicRoughness: { baseColorFactor: [0.2, 0.4, 0.6, 1] } }],
+      meshes: [{ primitives: [{ attributes: { POSITION: 0, NORMAL: 1 }, indices: 2, material: 0, mode: 4 }] }],
+      nodes: [{ mesh: 0 }],
+    };
+    const mesh = glbToMesh(buildGlb(json, triangleBin()));
+    expect(mesh.colors).toBeDefined();
+    [0.2, 0.4, 0.6, 0.2, 0.4, 0.6, 0.2, 0.4, 0.6].forEach((v, i) => expect(mesh.colors![i]).toBeCloseTo(v, 5));
+  });
+
   it('parses container chunks and rejects a non-glb', () => {
     const { json, bin } = parseGlb(buildGlb({ ...TRI_GLTF, nodes: [{ mesh: 0 }] }, triangleBin()));
     expect(json.meshes?.length).toBe(1);

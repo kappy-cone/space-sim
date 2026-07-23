@@ -82,6 +82,24 @@ function fitToUnit(md: MeshData): Mat4 {
   return multiply(scaling(1 / radius), translation(-cx, -cy, -cz));
 }
 
+/** Center a mesh on its footprint and scale to unit, but rest its BOTTOM
+ * on y = 0 — for ground props (hangars, dishes) that stand on the base. */
+function fitToGround(md: MeshData): Mat4 {
+  const pos = md.positions;
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < pos.length; i += 3) {
+    for (let k = 0; k < 3; k++) {
+      const x = pos[i + k]!;
+      if (x < min[k]!) min[k] = x;
+      if (x > max[k]!) max[k] = x;
+    }
+  }
+  const cx = (min[0]! + max[0]!) / 2, cz = (min[2]! + max[2]!) / 2;
+  const s = 1 / (Math.max(max[0]! - cx, max[2]! - cz) || 1);
+  return multiply(translation(-cx * s, -min[1]! * s, -cz * s), scaling(s));
+}
+
 const p = (x: number, y: number, z: number): V3 => v3(x, y, z);
 /** A double-sided triangle (visible from both faces). */
 const dbl = (a: V3, b: V3, c: V3): Tri[] => [[a, b, c], [a, c, b]];
@@ -141,6 +159,10 @@ export class Dogfight3D {
   // view's forward), Y up — no reorientation needed.
   private jetOrient: Mat4 = identity();
 
+  /** CC0 Kenney Space Kit base props (hangars, dish, structure), loaded
+   * async; each maps to its ground-fit matrix once ready. */
+  private props = new Map<string, Mat4>();
+
   private hud!: HTMLElement;
   private feed!: HTMLElement;
   private banner!: HTMLElement;
@@ -180,6 +202,20 @@ export class Dogfight3D {
         this.jetModel = true;
       })
       .catch((e) => console.warn('[dogfight] jet model unavailable, using procedural delta:', e));
+    // CC0 Kenney Space Kit base structures — hangars, a dish, a control
+    // block. Best-effort: the base just lacks them if a file is missing.
+    for (const [key, url] of [
+      ['hangar', '/models/hangar_largeA.glb'],
+      ['dish', '/models/satelliteDish_large.glb'],
+      ['structure', '/models/structure_detailed.glb'],
+    ] as const) {
+      loadGlbMesh(url)
+        .then((md) => {
+          this.renderer.mesh(`prop-${key}`, () => md);
+          this.props.set(key, fitToGround(md));
+        })
+        .catch(() => undefined);
+    }
 
     this.camera.minDist = 800;
     this.camera.maxDist = 160_000;
@@ -375,6 +411,22 @@ export class Dogfight3D {
     };
     strip(this.runwayA, [0.24, 0.28, 0.4]);
     strip(this.runwayB, [0.4, 0.28, 0.28]);
+
+    // Base structures (CC0 Kenney Space Kit): hangars beside each runway,
+    // a control block and a satellite dish flanking the base pad. Their
+    // own material colours show (drawn with a white tint).
+    const prop = (key: string, x: number, z: number, size: number, rotY: number): void => {
+      const fx = this.props.get(key);
+      if (!fx) return;
+      const model = multiply(multiply(translation(x, 4, z), multiply(rotationY(rotY), scaling(size))), fx);
+      this.renderer.draw(`prop-${key}`, model, [1, 1, 1]);
+    };
+    if (this.runwayA) prop('hangar', siteLocalX(this.runwayA), 900, 520, 0);
+    if (this.runwayB) prop('hangar', siteLocalX(this.runwayB), -900, 520, Math.PI);
+    if (this.base) {
+      prop('structure', siteLocalX(this.base) - 700, 500, 340, 0.4);
+      prop('dish', siteLocalX(this.base) + 800, 600, 300, -0.6);
+    }
 
     // Trails.
     for (const [key, tr] of this.trails) {

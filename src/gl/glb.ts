@@ -48,6 +48,7 @@ interface GltfPrimitive {
   attributes: Record<string, number>;
   indices?: number;
   mode?: number;
+  material?: number;
 }
 interface Gltf {
   accessors?: GltfAccessor[];
@@ -56,6 +57,10 @@ interface Gltf {
   nodes?: GltfNode[];
   scenes?: { nodes?: number[] }[];
   scene?: number;
+  /** Only the flat base colour is read — no textures, no PBR shading.
+   * Kenney-style kits colour each part with a material baseColorFactor,
+   * which the flat-shading renderer treats as a per-vertex colour. */
+  materials?: { pbrMetallicRoughness?: { baseColorFactor?: number[] } }[];
 }
 
 /** Split a .glb container into its JSON and binary chunks. */
@@ -189,6 +194,9 @@ export function glbToMesh(buffer: ArrayBuffer): MeshData {
         const vcount = pos.data.length / 3;
         const nrm = prim.attributes.NORMAL !== undefined ? readAccessor(json, bin, prim.attributes.NORMAL).data : null;
         const col = prim.attributes.COLOR_0 !== undefined ? readAccessor(json, bin, prim.attributes.COLOR_0) : null;
+        // Per-vertex colour takes precedence; otherwise the material's
+        // flat base colour is applied to the whole primitive.
+        const mat = prim.material !== undefined ? json.materials?.[prim.material]?.pbrMetallicRoughness?.baseColorFactor : undefined;
         for (let i = 0; i < vcount; i++) {
           const wp = applyPoint(world, pos.data[i * 3]!, pos.data[i * 3 + 1]!, pos.data[i * 3 + 2]!);
           positions.push(wp[0], wp[1], wp[2]);
@@ -202,6 +210,9 @@ export function glbToMesh(buffer: ArrayBuffer): MeshData {
           if (col) {
             hasColor = true;
             colors.push(col.data[i * col.comps]!, col.data[i * col.comps + 1]!, col.data[i * col.comps + 2]!);
+          } else if (mat) {
+            hasColor = true;
+            colors.push(mat[0] ?? 1, mat[1] ?? 1, mat[2] ?? 1);
           } else {
             colors.push(1, 1, 1);
           }
