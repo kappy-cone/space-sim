@@ -361,11 +361,15 @@ export class Sim {
     this.q = 0;
     this.mach = 0;
     const weight = (this.state.m * this.body.mu) / (this.body.radius * this.body.radius);
+    // Re-pin BEFORE releasing: t just advanced, and the stored state still
+    // matches the previous step's pin. Releasing without refreshing hands
+    // free flight a position stale by ω·R·dt (~23 m westward at Earth
+    // rotation for dt = 50 ms) — visible as the vehicle snapping sideways
+    // off the pad at liftoff.
+    this.pinToSurface();
     if (thrust > weight) {
       this.landed = false;
       this.events.push({ type: 'liftoff', t: this.state.t });
-    } else {
-      this.pinToSurface();
     }
     return dt;
   }

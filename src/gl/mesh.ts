@@ -196,6 +196,7 @@ export function terrainColor(lat: number, lon: number): [number, number, number]
 export function groundCapMesh(R: number, radius: number, sink: number, rings = 24, segs = 48): MeshData {
   const pos: number[] = [];
   const nrm: number[] = [];
+  const col: number[] = [];
   const idx: number[] = [];
   for (let i = 0; i <= rings; i++) {
     // Quadratic ring spacing: fine near the pad, coarse at the rim.
@@ -209,6 +210,10 @@ export function groundCapMesh(R: number, radius: number, sink: number, rings = 2
       // True sphere normal: direction from the body center (0, −R, 0).
       const nl = Math.hypot(c * rho, y + R, s * rho) || 1;
       nrm.push((c * rho) / nl, (y + R) / nl, (s * rho) / nl);
+      // Subtle deterministic mottling (±6% brightness): a featureless
+      // ground gives no motion parallax, which made descents feel static.
+      const b = 1 + 0.06 * Math.sin(9.7 * (i / rings) + 0.5) * Math.cos(5 * a + 1.3);
+      col.push(b, b, b);
     }
   }
   const row = segs + 1;
@@ -222,6 +227,7 @@ export function groundCapMesh(R: number, radius: number, sink: number, rings = 2
     positions: new Float32Array(pos),
     normals: new Float32Array(nrm),
     indices: new Uint16Array(idx),
+    colors: new Float32Array(col),
   };
 }
 

@@ -74,6 +74,9 @@ export class Flight3D {
   private autoLand = false;
   private frameCount = 0;
   private landingPanelShown = false;
+  /** Airflow streak parcels, positions relative to the vehicle [m]. */
+  private streaks: { x: number; y: number; z: number }[] = [];
+  private lastWallDt = 1 / 60;
   /** Impact predictor result: sim-plane angle + seconds from now. */
   private impact: { angle: number; dt: number } | null = null;
 
@@ -414,6 +417,7 @@ export class Flight3D {
   private frame = (now: number): void => {
     const wallDt = Math.min(0.1, (now - this.lastFrame) / 1000);
     this.lastFrame = now;
+    this.lastWallDt = wallDt;
     const s = this.sim;
     const atmTop = s.body.atmosphere?.topAltitude ?? 0;
 
@@ -735,6 +739,78 @@ export class Flight3D {
         );
         this.renderer.draw('arrow', airM, [0.45, 0.95, 0.55], 0.45, true);
       }
+    }
+
+    // ---- Motion cues (render-only; the sim never sees these) ----
+    // Airflow streaks: parcels streaming past the vehicle opposite the
+    // airspeed vector — without them fast flight and falls read as static
+    // because the surrounding sky/ground are featureless.
+    const airVec = s.airspeedVec;
+    const airSpeed = norm(airVec);
+    if (this.running && !s.crashed && s.body.atmosphere && s.altitude < s.body.atmosphere.topAltitude && airSpeed > 60) {
+      const range = Math.max(80, this.geomLength * 5);
+      if (this.streaks.length === 0) {
+        for (let i = 0; i < 70; i++) {
+          this.streaks.push({
+            x: (Math.random() * 2 - 1) * range,
+            y: (Math.random() * 2 - 1) * range,
+            z: (Math.random() * 2 - 1) * range * 0.5,
+          });
+        }
+      }
+      // World-space flow: air moves past the vehicle at −airspeed.
+      const dW = this.toWorld(airVec.x, airVec.y);
+      const inv = 1 / airSpeed;
+      const dir = { x: dW.x * inv, y: dW.y * inv, z: 0 };
+      // Advect at a readability-capped speed so streaks persist a few
+      // frames even at km/s; their LENGTH carries the speed cue instead.
+      const adv = Math.min(airSpeed, range * 4) * this.lastWallDt;
+      const len = Math.min(range * 0.6, 3 + airSpeed * 0.04);
+      const pts = new Float32Array(this.streaks.length * 6);
+      for (let i = 0; i < this.streaks.length; i++) {
+        const p = this.streaks[i]!;
+        p.x -= dir.x * adv;
+        p.y -= dir.y * adv;
+        if (p.x * p.x + p.y * p.y + p.z * p.z > range * range) {
+          // Respawn upstream in a disc perpendicular-ish to the flow.
+          p.x = dir.x * range * 0.85 + (Math.random() * 2 - 1) * range * 0.6;
+          p.y = dir.y * range * 0.85 + (Math.random() * 2 - 1) * range * 0.6;
+          p.z = (Math.random() * 2 - 1) * range * 0.5;
+        }
+        pts[i * 6] = p.x;
+        pts[i * 6 + 1] = p.y;
+        pts[i * 6 + 2] = p.z;
+        pts[i * 6 + 3] = p.x - dir.x * len;
+        pts[i * 6 + 4] = p.y - dir.y * len;
+        pts[i * 6 + 5] = p.z;
+      }
+      this.renderer.updateLines('streaks', pts, true);
+      const alpha = Math.min(0.45, 0.08 + s.q / 40_000);
+      this.renderer.draw('streaks', translation(rocketW.x, rocketW.y, rocketW.z), [0.85, 0.92, 1.0], alpha, true);
+
+      // Compression glow: Sutton–Graves stagnation heating scales with
+      // √ρ·v³ — used here purely as a visual threshold/intensity, drawn
+      // as a hot sheath on the windward side.
+      const rho = s.body.atmosphere.density(Math.max(0, s.altitude));
+      const heat = Math.sqrt(rho) * airSpeed ** 3;
+      if (heat > 5e8) {
+        const a = Math.min(0.55, (heat - 5e8) / 5e9);
+        const airA = Math.atan2(airVec.y, airVec.x);
+        const gw = Math.max(2.5, this.geomLength * 0.22) * (1 + 0.1 * Math.random());
+        const glowLocal = multiply(
+          multiply(rotationZ(-airA), translation(0, this.geomLength * 0.18, 0)),
+          scalingXYZ(gw, this.geomLength * 0.8, gw),
+        );
+        this.renderer.draw(
+          'shell',
+          multiply(translation(rocketW.x, rocketW.y, rocketW.z), glowLocal),
+          [1.0, 0.55, 0.22],
+          a,
+          true,
+        );
+      }
+    } else if (this.streaks.length > 0) {
+      this.streaks.length = 0;
     }
 
     // Impact predictor marker.

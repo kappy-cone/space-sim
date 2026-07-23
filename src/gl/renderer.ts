@@ -134,12 +134,13 @@ export class Renderer {
     this.createLines(key, positions, this.gl.STATIC_DRAW);
   }
 
-  /** Create-or-update a dynamic line strip (orbit paths, trails). */
-  updateLines(key: string, positions: Float32Array): void {
+  /** Create-or-update a dynamic line mesh (orbit paths, trails, streaks).
+   * Defaults to a strip; pass `segments: true` for independent GL_LINES. */
+  updateLines(key: string, positions: Float32Array, segments = false): void {
     const gl = this.gl;
     const existing = this.meshes.get(key);
     if (!existing) {
-      this.createLines(key, positions, gl.DYNAMIC_DRAW, gl.LINE_STRIP);
+      this.createLines(key, positions, gl.DYNAMIC_DRAW, segments ? gl.LINES : gl.LINE_STRIP);
       return;
     }
     gl.bindBuffer(gl.ARRAY_BUFFER, existing.posBuf!);

@@ -85,6 +85,19 @@ describe('reference ascent', () => {
     expect(ap.phase).toBe('failed');
   });
 
+  it('liftoff hands over a state continuous with the rotating pad', () => {
+    const sim = new Sim(referenceVehicle);
+    while (!sim.events.some((e) => e.type === 'liftoff') && sim.state.t < 30) sim.step(0.05);
+    expect(sim.events.some((e) => e.type === 'liftoff')).toBe(true);
+    // At release the position must be the pad's surface point at time t —
+    // a pin stale by one step (ω·R·dt ≈ 23 m westward) was visible as the
+    // vehicle snapping sideways off the pad.
+    const upAngle = Math.atan2(sim.state.r.y, sim.state.r.x);
+    const padAngle = 7.292115e-5 * sim.state.t;
+    expect(Math.abs(upAngle - padAngle)).toBeLessThan(1e-9);
+    expect(norm(sim.airspeedVec)).toBeLessThan(1e-6);
+  });
+
   it('the airspeed on the pad is zero but inertial speed is Earth rotation', () => {
     const sim = new Sim(referenceVehicle);
     expect(norm(sim.airspeedVec)).toBeLessThan(1e-9);
