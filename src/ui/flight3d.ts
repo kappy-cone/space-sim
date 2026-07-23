@@ -28,7 +28,7 @@ import {
   translation,
   v3,
 } from '../gl/mat4';
-import { finMesh, segmentsMesh, sphereMesh, terrainColor } from '../gl/mesh';
+import { finMesh, groundCapMesh, segmentsMesh, sphereMesh, terrainColor } from '../gl/mesh';
 import { Renderer } from '../gl/renderer';
 import { fmtDistance, fmtMass, fmtSpeed, fmtTime } from './format';
 
@@ -132,6 +132,9 @@ export class Flight3D {
       );
     }
     this.renderer.mesh('planet', () => sphereMesh(48, 72, terrainColor));
+    // Local ground: 60 km cap anchored at the sub-vehicle surface point,
+    // 0.15 m below the datum so the pad deck stays proud of it.
+    this.renderer.mesh('groundcap', () => groundCapMesh(this.sim.body.radius, 60_000, 0.15));
     this.renderer.mesh('shell', () => sphereMesh(24, 36));
     this.renderer.mesh('plume', () => segmentsMesh([{ y0: -1, y1: 0, r0: 0.45, r1: 1 }]));
     this.renderer.mesh('pad', () => segmentsMesh([{ y0: 0, y1: 1, r0: 1, r1: 0 }]));
@@ -573,7 +576,26 @@ export class Flight3D {
     // Planet: terrain-colored sphere rotating with the body (β = −ωt under
     // the plane mapping), plus haze shells at the USSA76 layer scales.
     const spin = rotationZ(-s.body.rotationRate * s.state.t);
-    this.renderer.draw('planet', multiply(spin, scaling(s.body.radius)), [1, 1, 1]);
+    // depthPush: the sphere's model origin is the body center, so its MVP
+    // jitters ~0.5 m at Earth scale in float32 — push it behind the pad
+    // and the local ground cap instead of letting them z-fight (the
+    // "flashing ground at launch" bug).
+    this.renderer.draw('planet', multiply(spin, scaling(s.body.radius)), [1, 1, 1], 1, false, false, true);
+    // Local terrain cap anchored at the sub-vehicle surface point: its
+    // camera-relative translation is small, so the ground the player
+    // actually looks at is depth-stable.
+    if (s.altitude < 30_000) {
+      const upA = Math.atan2(s.state.r.y, s.state.r.x);
+      const capW = this.toWorld(s.body.radius * Math.cos(upA), s.body.radius * Math.sin(upA));
+      // Tint from the terrain paint at the sub-vehicle point (sim plane =
+      // equator, lat 0; the launch site sits at longitude 90°).
+      const tint = terrainColor(0, Math.PI / 2 - upA + s.body.rotationRate * s.state.t);
+      this.renderer.draw(
+        'groundcap',
+        multiply(translation(capW.x, capW.y, capW.z), rotationZ(-upA)),
+        tint,
+      );
+    }
     if (s.body.atmosphere) {
       this.renderer.draw('shell', scaling(s.body.radius + 12_000), [0.55, 0.7, 0.9], 0.1);
       this.renderer.draw('shell', scaling(s.body.radius + 45_000), [0.4, 0.6, 0.95], 0.07);

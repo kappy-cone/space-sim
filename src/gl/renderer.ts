@@ -184,10 +184,18 @@ export class Renderer {
     alpha = 1,
     unlit = false,
     onTop = false,
+    depthPush = false,
   ): void {
     const gl = this.gl;
     const m = this.meshes.get(key);
     if (!m) return;
+    // depthPush shoves this draw slightly deeper in the depth buffer —
+    // used for the global planet sphere so near-coplanar local geometry
+    // (pad deck, local ground cap) always wins instead of z-fighting.
+    if (depthPush) {
+      gl.enable(gl.POLYGON_OFFSET_FILL);
+      gl.polygonOffset(2, 4);
+    }
     // Camera-relative model: translation minus eye, in float64.
     const rel = Float64Array.from(model);
     rel[12]! -= this.eye.x;
@@ -206,6 +214,7 @@ export class Renderer {
     else gl.drawArrays(m.mode, 0, m.count);
     gl.bindVertexArray(null);
     if (onTop) gl.enable(gl.DEPTH_TEST);
+    if (depthPush) gl.disable(gl.POLYGON_OFFSET_FILL);
     gl.depthMask(true);
   }
 }

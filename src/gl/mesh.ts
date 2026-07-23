@@ -183,6 +183,48 @@ export function terrainColor(lat: number, lon: number): [number, number, number]
   return [0.07, 0.2, 0.42]; // deep ocean
 }
 
+/**
+ * Local ground cap: a spherical-cap patch of body radius R, model origin at
+ * the surface point, +y = local up. The global planet sphere's model origin
+ * is the body center, so its MVP picks up float32 quantization ~0.5 m at
+ * Earth scale — enough to make near-field terrain jitter and z-fight the
+ * launch pad every frame. This cap is anchored at the surface (small
+ * camera-relative translation → stable) and follows the true sphere
+ * (y = −(R − √(R²−ρ²))), sitting `sink` metres below the datum so the pad
+ * deck stays proud of it.
+ */
+export function groundCapMesh(R: number, radius: number, sink: number, rings = 24, segs = 48): MeshData {
+  const pos: number[] = [];
+  const nrm: number[] = [];
+  const idx: number[] = [];
+  for (let i = 0; i <= rings; i++) {
+    // Quadratic ring spacing: fine near the pad, coarse at the rim.
+    const rho = radius * (i / rings) ** 2;
+    const y = -(R - Math.sqrt(Math.max(0, R * R - rho * rho))) - sink;
+    for (let j = 0; j <= segs; j++) {
+      const a = (j / segs) * 2 * Math.PI;
+      const c = Math.cos(a);
+      const s = Math.sin(a);
+      pos.push(c * rho, y, s * rho);
+      // True sphere normal: direction from the body center (0, −R, 0).
+      const nl = Math.hypot(c * rho, y + R, s * rho) || 1;
+      nrm.push((c * rho) / nl, (y + R) / nl, (s * rho) / nl);
+    }
+  }
+  const row = segs + 1;
+  for (let i = 0; i < rings; i++) {
+    for (let j = 0; j < segs; j++) {
+      const a = i * row + j;
+      idx.push(a, a + 1, a + row, a + 1, a + row + 1, a + row);
+    }
+  }
+  return {
+    positions: new Float32Array(pos),
+    normals: new Float32Array(nrm),
+    indices: new Uint16Array(idx),
+  };
+}
+
 /** Ground grid lines mesh (positions only, drawn unlit as GL_LINES). */
 export function gridMesh(half: number, step: number): Float32Array {
   const lines: number[] = [];
