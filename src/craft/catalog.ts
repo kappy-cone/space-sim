@@ -235,6 +235,36 @@ function engine(
   });
 }
 
+// ---- suppliers ----
+// Pure fiction over UNCHANGED data: the non-domination table expressed
+// as manufacturers with house philosophies, so the tradeoff structure
+// reads as "who makes what" rather than a spreadsheet. No part number
+// moves; this is flavor with a pedagogical spine.
+const MAKERS: readonly [RegExp, string][] = [
+  [
+    /^(e-aj10|srb-|ullage-motor|hyp\d|rcs-quad)/,
+    'Karman & Voss Ordnance — military-heritage storables and solids: lights every time, restarts forever, stores for years; Isp is the price',
+  ],
+  [
+    /^(e-rl10b2|e-rs25|e-j2|h\d)/,
+    'Boreal Hydrogenics — the hydrogen house: nothing touches the Isp; boiloff, bulk, and fragile ground handling come with it',
+  ],
+  [
+    /^(e-merlin|e-rutherford|e-rd180|e-raptor|t\d|m\d)/,
+    'Meridian Kerolox Works — cheap, dense kerolox/methalox by the pallet: the workhorse middle of every tradeoff',
+  ],
+  [
+    /^(e-cfm56|e-j79|e-rj43|jf\d|wing-|tailplane|gear-)/,
+    'Consolidated Turbine & Airframe — air-breathers and the wings they push: twenty times the Isp inside the envelope, zero outside it',
+  ],
+];
+
+/** Manufacturer line for a part id, or null (structure is unbranded). */
+export function makerOf(id: string): string | null {
+  for (const [re, m] of MAKERS) if (re.test(id)) return m;
+  return null;
+}
+
 const R12 = { min: 1.0, max: 8 };
 const R24 = { min: 1.5, max: 16 };
 const R37 = { min: 2.0, max: 26 };

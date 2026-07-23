@@ -72,6 +72,12 @@ export interface SpaceObject {
   cdA: number;
   /** Owning committed launch number. */
   launch: number;
+  /** World time the object was deployed (t0 moves when decay rebuilds
+   * the state; this never does — the tracking view's age column). */
+  born?: number;
+  /** Deployed by a launch that violated its range corridor — flies the
+   * same, but satisfies no mission. */
+  illegal?: boolean;
 }
 
 export interface SiteState {
@@ -110,6 +116,31 @@ export interface WorldState {
   revealed: string;
   /** Capped history of world events (newest last) for the tracking view. */
   log: WorldEvent[];
+  /** The demand model's open/settled wants (see missions.ts). */
+  missions: MissionRecord[];
+  /** Deterministic mission-generator counter (the PRNG seed source). */
+  missionSeq: number;
+}
+
+/** Declarative mission record — a constraint set, nothing else. The
+ * world wants a thing in a particular orbit by a particular date; there
+ * is no currency and no reward beyond the program record. */
+export interface MissionRecord {
+  id: string;
+  title: string;
+  func: SatelliteFunc;
+  body: string;
+  /** Periapsis altitude floor / apoapsis ceiling [m]. */
+  altMin: number;
+  altMax: number;
+  /** Required orbit direction: +1 prograde, −1 retrograde, 0 either. */
+  dir: 1 | -1 | 0;
+  maxEcc: number;
+  /** World epoch the want lapses [s]. */
+  deadline: number;
+  /** Tug missions: the registry object to remove. */
+  targetId?: string;
+  status: 'open' | 'done' | 'expired';
 }
 
 const LOG_CAP = 200;
@@ -123,6 +154,8 @@ export function emptyWorld(): WorldState {
     sites: {},
     revealed: '0'.repeat(Math.ceil(REVEAL_BINS / 4)),
     log: [],
+    missions: [],
+    missionSeq: 0,
   };
 }
 
@@ -143,6 +176,9 @@ export function deserializeWorld(json: string): WorldState | null {
   if (typeof w !== 'object' || w === null || typeof w.version !== 'number') return null;
   if (w.version > WORLD_VERSION) throw new Error(`world save version ${w.version} is newer than this build`);
   // version 1 is current — future migrations switch on w.version here.
+  // In-version leniency: fields added during v1 development default in.
+  w.missions ??= [];
+  w.missionSeq ??= 0;
   return w;
 }
 

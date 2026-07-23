@@ -34,6 +34,7 @@ import {
   revealBins,
   runwayWearSeconds,
 } from './world';
+import { tickMissions } from './missions';
 
 /**
  * Downrange direction of flight relative to the rotating surface:
@@ -176,6 +177,7 @@ export function harvestCommittedFlight(
           skProp: 0,
           cdA: sep.cdA,
           launch: n,
+          born: sep.t,
         },
         { type: 'debris', t: sep.t, id, name: `${v.name} stage ${sep.stage + 1}` },
       );
@@ -227,6 +229,7 @@ export function harvestCommittedFlight(
         skProp: residual,
         cdA: drag ? drag.cdBare[di]! * drag.areaBare[di]! : s.vehicle.cd * s.vehicle.area,
         launch: n,
+        born: s.state.t,
       },
       { type: 'deployed', t: s.state.t, id, name: v.name, func: v.func },
     );
@@ -236,6 +239,13 @@ export function harvestCommittedFlight(
     if (v.overflownBins) revealBins(w, v.overflownBins);
   }
   events.push(...checkSiteDiscoveries(w, tEnd));
+
+  // A range-violating launch flies the same physics but satisfies no
+  // demand — its deployments are marked illegal.
+  if (opts.rangeViolated) for (const o of added) o.illegal = true;
+
+  // Settle the mission board against the new sky.
+  events.push(...tickMissions(w));
 
   return { events, added, recovered };
 }

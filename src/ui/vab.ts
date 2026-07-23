@@ -3,7 +3,7 @@
 // The craft tree is the single source of truth; every mutation recompiles
 // physics and refreshes the panels — TWR and Δv move while you build.
 
-import { PARTS, PartDef, partById } from '../craft/catalog';
+import { PARTS, PartDef, makerOf, partById } from '../craft/catalog';
 import { engineById } from '../physics/parts';
 import { propellantById } from '../physics/propellants';
 import { massFlow } from '../physics/vehicle';
@@ -26,9 +26,13 @@ import {
   partHeight,
 } from '../craft/craft';
 import { OrbitCamera } from '../gl/camera';
-import { SITES, defaultSite } from '../physics/sites';
+import { SITES, defaultSite, siteById } from '../physics/sites';
 import { WorldState, siteAvailable, siteState } from '../world/world';
+import { constellationAltitude } from '../world/network';
+import { SYNCHRONOUS_ALT } from '../world/missions';
+import { R_EARTH } from '../physics/constants';
 import { LaunchContext } from './flight3d';
+import { TrackingView } from './tracking';
 import { multiply, rotationY, scaling, scalingXYZ, translation, v3 } from '../gl/mat4';
 import { finMesh, gridMesh, segmentsMesh, wingMesh } from '../gl/mesh';
 import { planeStability } from '../physics/massmodel';
@@ -528,6 +532,25 @@ export class Vab {
     }
   }
 
+  private plannerN = 4;
+
+  /** Constellation planner — shown when a relay module is aboard. KSP
+   * players leave the game for an external tool to do exactly this
+   * calculation; the builder should answer it. Math: the single-plane
+   * street-of-coverage relation (see world/network.ts). */
+  private plannerHtml(): string {
+    if (!this.compiled.funcModules.some((m) => m.func === 'relay')) return '';
+    const opts = [3, 4, 5, 6, 8, 10, 12]
+      .map((n) => `<option value="${n}" ${n === this.plannerN ? 'selected' : ''}>${n}</option>`)
+      .join('');
+    const h = constellationAltitude(this.plannerN, R_EARTH);
+    const hTxt = isFinite(h) ? `≥ ${Math.round(h / 1000).toLocaleString()} km circular` : 'impossible (too few)';
+    return `<div class="planner">Constellation:
+      <select class="planner-n">${opts}</select> relays, one plane, 5° mask →
+      continuous coverage at <b>${hTxt}</b> ·
+      synchronous hover at <b>${Math.round(SYNCHRONOUS_ALT / 1000).toLocaleString()} km</b></div>`;
+  }
+
   private renderStats(): void {
     const c = this.compiled;
     // Jet stages: Tsiolkovsky Δv over a fuel-only 6,600 s Isp is not an
@@ -641,8 +664,43 @@ export class Vab {
       ${verdict}
       ${stability}
       ${warnings}
-      <button class="primary launch-btn" ${c.blockers.length > 0 ? 'disabled' : ''}>${c.blockers.length > 0 ? 'Cannot fly' : 'Launch ▸'}</button>`;
+      ${this.plannerHtml()}
+      <button class="primary launch-btn" ${c.blockers.length > 0 ? 'disabled' : ''}>${c.blockers.length > 0 ? 'Cannot fly' : 'Launch ▸'}</button>
+      <button class="program-btn" style="width:100%;margin-top:6px">Program ▸</button>`;
     this.statsEl.querySelector<HTMLButtonElement>('.launch-btn')!.onclick = () => this.launchDialog();
+    this.statsEl.querySelector<HTMLButtonElement>('.program-btn')!.onclick = () =>
+      new TrackingView(this.root, this.world, this.saveWorld);
+    const sel = this.statsEl.querySelector<HTMLSelectElement>('.planner-n');
+    if (sel) {
+      sel.onchange = () => {
+        this.plannerN = Number(sel.value);
+        this.renderStats();
+      };
+    }
+  }
+
+  /**
+   * Pre-launch geometry check: what the selected site can reach and
+   * which open missions it cannot serve. The player must never discover
+   * a geometric impossibility after liftoff — the direction flip is
+   * ~2×v_orb ≈ 15.6 km/s in LEO, not a correction anyone can buy.
+   */
+  private feasibilityHtml(siteId: string): string {
+    const site = siteById(siteId);
+    const lines: string[] = [];
+    if (site.type === 'pad' && site.corridor !== 'both') {
+      lines.push(
+        `Corridor reaches <b>${site.corridor === 'east' ? 'prograde' : 'retrograde'}</b> orbits only — the other direction is a ~15.6 km/s flip in LEO.`,
+      );
+    }
+    for (const m of this.world.missions) {
+      if (m.status !== 'open' || m.dir === 0 || site.type !== 'pad') continue;
+      const ok = site.corridor === 'both' || (m.dir === 1 ? site.corridor === 'east' : site.corridor === 'west');
+      if (!ok) {
+        lines.push(`✗ <i>${m.title}</i> needs ${m.dir === 1 ? 'prograde' : 'retrograde'} — not from this site.`);
+      }
+    }
+    return lines.length > 0 ? `<div class="modal-section dim">${lines.join('<br>')}</div>` : '';
   }
 
   /**
@@ -697,6 +755,7 @@ export class Vab {
             Committed flight #${w.launches + 1} — enters the program record: registry, debris, site wear</label>
         </div>
         <div class="modal-section"><b>${plane ? 'Runway' : 'Pad'}</b>${siteRows}</div>
+        ${this.feasibilityHtml(siteId)}
         <div class="modal-section dim">World clock T ${fmtTime(w.epoch)} · ${w.launches} committed launch${w.launches === 1 ? '' : 'es'} · ${this.world.objects.length} object${this.world.objects.length === 1 ? '' : 's'} on orbit</div>
         <div class="modal-actions">
           <button class="go primary">${committed ? 'Commit & launch ▸' : 'Fly ▸'}</button>
@@ -1409,6 +1468,8 @@ function partStats(def: PartDef): string {
     if (def.fairing) lines.push('encloses the payload from the airstream; jettison via staging');
     if (def.noseCd !== undefined) lines.push(`nose drag class Cd ${def.noseCd}`);
   }
+  const maker = makerOf(def.id);
+  if (maker) lines.push(`🏭 ${maker}`);
   lines.push('— ' + def.source);
   return lines.join('\n');
 }
