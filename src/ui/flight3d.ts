@@ -13,6 +13,7 @@ import { Autopilot, defaultPlan } from '../physics/autopilot';
 import { BODIES } from '../physics/bodies';
 import { LandingAutopilot } from '../physics/landing';
 import { Sim, TOUCHDOWN_LIMITS } from '../physics/sim';
+import { stageThrustAtPressure } from '../physics/vehicle';
 import { machDragFactor, speedOfSound } from '../physics/atmosphere';
 import { add, norm, perp, scale, sub, vec } from '../physics/vec2';
 import { P0_SEA_LEVEL } from '../physics/constants';
@@ -72,6 +73,7 @@ export class Flight3D {
   private landAp = new LandingAutopilot();
   private autoLand = false;
   private frameCount = 0;
+  private landingPanelShown = false;
   /** Impact predictor result: sim-plane angle + seconds from now. */
   private impact: { angle: number; dt: number } | null = null;
 
@@ -759,11 +761,10 @@ export class Flight3D {
     const surfaceG = s.body.mu / (s.body.radius * s.body.radius);
     let twr = 0;
     if (stage && s.actualThrottle > 0) {
-      // Display TWR from current acceleration capability.
-      twr =
-        (s.actualThrottle *
-          stage.engines.reduce((sum, g) => sum + g.engine.thrustVac * g.count, 0)) /
-        (s.state.m * surfaceG);
+      // Display TWR from current acceleration capability at the local
+      // ambient pressure — vacuum thrust overstates it at sea level.
+      const p = s.body.atmosphere?.pressure(Math.max(0, s.altitude)) ?? 0;
+      twr = (s.actualThrottle * stageThrustAtPressure(stage, p)) / (s.state.m * surfaceG);
     }
     this.set('twr', twr.toFixed(2), twr > 0 && twr < 1 ? 'warn' : '');
     this.set('throttle', `${Math.round(s.throttle * 100)} % → ${Math.round(s.actualThrottle * 100)} %`);
@@ -789,9 +790,17 @@ export class Flight3D {
     }
 
     // Landing panel: live during descent (or auto-land), with per-limit
-    // margin coloring against the active touchdown mode.
-    const descending = this.running && !s.landed && s.vSpeed > 0 && s.altitude < 20_000;
-    if (descending || this.autoLand || s.hasLanded) {
+    // margin coloring against the active touchdown mode. Hysteresis so a
+    // hover with vSpeed oscillating around 0 doesn't flicker the panel:
+    // appears when clearly descending, hides only when clearly climbing.
+    if (!this.landingPanelShown) {
+      if (this.running && !s.landed && s.vSpeed > 0.5 && s.altitude < 20_000) {
+        this.landingPanelShown = true;
+      }
+    } else if (s.vSpeed < -2 || s.altitude >= 22_000 || (s.landed && !s.hasLanded)) {
+      this.landingPanelShown = false;
+    }
+    if (this.landingPanelShown || this.autoLand || s.hasLanded) {
       this.landingPanel.style.display = 'block';
       const mode = s.legFootprint() > 0 ? 'legs' : s.activeChutes().length > 0 ? 'chute' : 'none';
       const lim = TOUCHDOWN_LIMITS[mode];

@@ -7,7 +7,7 @@
 import { Sim } from './sim';
 import { norm } from './vec2';
 import { CelestialBody, EARTH } from './bodies';
-import { stageDryMass, stageEffectiveVe, stageMassFlow, stagePropellant } from './vehicle';
+import { stageDryMass, stageEffectiveVe, stageMassFlow, stagePropellant, stageThrustVac } from './vehicle';
 
 export type AutopilotPhase = 'ascent' | 'coast' | 'circularize' | 'done' | 'failed';
 
@@ -112,10 +112,38 @@ export class Autopilot {
         break;
       }
       case 'circularize': {
+        // Prograde burn with an ENERGY cutoff. Prograde thrust keeps the
+        // steering loss near zero (any off-velocity component of a long
+        // insertion burn shows up 1:1 as steering loss); cutting off when
+        // the semi-major axis reaches the target radius leaves an orbit
+        // *centered* on the target — the old periapsis-threshold cutoff
+        // kept adding energy until Pe caught up, overshooting Ap by
+        // hundreds of km whenever the stage had Δv margin.
         sim.attitude = { mode: 'prograde' };
-        sim.throttle = 1;
-        // Done when periapsis reaches the target (small tolerance below).
-        if (el.rPeri >= this.plan.targetRadius - 20_000) {
+        // Δv equivalent of the remaining energy shortfall, for the taper:
+        // dE = μ·da/(2a²), and prograde thrust adds energy at rate v·(T/m),
+        // so dv_remaining ≈ μ·(r_t − a)/(2a²·v).
+        const TAPER = 2.5; // s; spool τ = 0.4 s tracks this comfortably
+        const minPeri = sim.body.radius + (sim.body.atmosphere?.topAltitude ?? 0) + 20_000;
+        const speed = norm(sim.state.v);
+        const dvE =
+          el.a > 0 && el.a < this.plan.targetRadius
+            ? (sim.body.mu * (this.plan.targetRadius - el.a)) / (2 * el.a * el.a * speed)
+            : 0;
+        // Pe shortfall in Δv terms: a tangential burn moves the opposite
+        // apsis by Δr ≈ 4a·Δv/v (first-order from the vis-viva relation).
+        const dvP = el.a > 0 ? (Math.max(0, minPeri - el.rPeri) * speed) / (4 * el.a) : 0;
+        const stage = sim.vehicle.stages[sim.stageIndex];
+        const aMax = stage ? stageThrustVac(stage) / sim.state.m : 0;
+        sim.throttle = aMax > 0 ? Math.min(1, Math.max(0.05, (dvE + dvP) / (aMax * TAPER))) : 1;
+        // Cutoff on energy (a at target) — but never with the periapsis
+        // still in the atmosphere: a flat ascent can reach the target
+        // energy while Pe is low, and that orbit decays. The plain Pe
+        // threshold stays as a safety net for degenerate states.
+        if (
+          (el.a > 0 && el.a >= this.plan.targetRadius && el.rPeri >= minPeri) ||
+          el.rPeri >= this.plan.targetRadius - 2_000
+        ) {
           sim.throttle = 0;
           this.phase = 'done';
         } else if (sim.propellant === 0 && sim.stageIndex >= sim.vehicle.stages.length - 1) {

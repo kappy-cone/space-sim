@@ -57,6 +57,11 @@ describe('reference ascent', () => {
     const el = sim.elements;
     expect(el.e).toBeLessThan(0.05);
     expect(el.rPeri - R_EARTH).toBeGreaterThan(150_000);
+    // The circularization cutoff is on orbit energy: the semi-major axis
+    // must land on the target radius (regression guard — the old Pe-only
+    // cutoff overshot a by +150 km given Δv margin).
+    expect(Math.abs(el.a - (R_EARTH + 250_000))).toBeLessThan(15_000);
+    expect(el.e).toBeLessThan(0.02);
     expect(sim.events.some((e) => e.type === 'orbit')).toBe(true);
     expect(sim.propellant).toBeGreaterThan(0); // margin, not a scraped pass
 

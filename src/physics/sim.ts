@@ -345,7 +345,10 @@ export class Sim {
     const p = this.body.atmosphere?.pressure(Math.max(0, this.altitude)) ?? 0;
     const cmd = this.burning ? this.throttle : 0;
     this.actualThrottle += ((cmd - this.actualThrottle) / SPOOL_TAU) * dt;
-    if (this.actualThrottle < 1e-4 && cmd === 0) this.actualThrottle = 0;
+    // The first-order lag is a spool *approximation*; a real shutdown ends
+    // sharply on valve closure rather than decaying forever, so cut the
+    // exponential tail once it falls below 1% of rated thrust.
+    if (this.actualThrottle < 0.01 && cmd === 0) this.actualThrottle = 0;
     let mdot = 0;
     let thrust = 0;
     if (stage && this.actualThrottle > 0 && this.propellant > 0) {
@@ -374,7 +377,10 @@ export class Sim {
 
     const cmd = this.burning ? this.throttle : 0;
     this.actualThrottle += ((cmd - this.actualThrottle) / SPOOL_TAU) * dt;
-    if (this.actualThrottle < 1e-4 && cmd === 0) this.actualThrottle = 0;
+    // The first-order lag is a spool *approximation*; a real shutdown ends
+    // sharply on valve closure rather than decaying forever, so cut the
+    // exponential tail once it falls below 1% of rated thrust.
+    if (this.actualThrottle < 0.01 && cmd === 0) this.actualThrottle = 0;
 
     let mdot = 0;
     let thrust = 0;
