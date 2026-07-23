@@ -1,0 +1,837 @@
+// 3D interactive flight view. The simulation stays planar (3-DOF in the
+// orbital plane); this view embeds that plane in 3D — sim (x, y) maps to
+// world (x, 0, −y) so the orbit is horizontal — and renders the actual
+// craft the player built, part meshes and all, at the simulated attitude.
+// Precision at planetary distances comes from the renderer's float64
+// camera-relative pipeline; orbit/trail line vertices are rebased to the
+// vehicle so nothing wobbles up close.
+
+import { PARTS, partById } from '../craft/catalog';
+import { Compiled } from '../craft/compile';
+import { Craft, placements } from '../craft/craft';
+import { Autopilot, defaultPlan } from '../physics/autopilot';
+import { BODIES } from '../physics/bodies';
+import { LandingAutopilot } from '../physics/landing';
+import { Sim, TOUCHDOWN_LIMITS } from '../physics/sim';
+import { machDragFactor, speedOfSound } from '../physics/atmosphere';
+import { add, norm, perp, scale, sub, vec } from '../physics/vec2';
+import { P0_SEA_LEVEL } from '../physics/constants';
+import { OrbitCamera } from '../gl/camera';
+import {
+  Mat4,
+  multiply,
+  rotationY,
+  rotationZ,
+  scaling,
+  scalingXYZ,
+  translation,
+  v3,
+} from '../gl/mat4';
+import { finMesh, segmentsMesh, sphereMesh, terrainColor } from '../gl/mesh';
+import { Renderer } from '../gl/renderer';
+import { fmtDistance, fmtMass, fmtSpeed, fmtTime } from './format';
+
+const WARP_STEPS = [1, 2, 5, 10, 25, 100, 1000];
+
+interface PartInstance {
+  partId: string;
+  defId: string;
+  isFin: boolean;
+  isLeg: boolean;
+  height: number;
+  burnIndex: number;
+  x: number;
+  y: number;
+  z: number;
+  angle: number;
+  color: [number, number, number];
+  // engine plume info
+  engine: boolean;
+  exitRadius: number;
+}
+
+export class Flight3D {
+  private sim: Sim;
+  private ap: Autopilot;
+  private autopilotOn = true;
+  private manualPitch = 0;
+  private warpIndex = 0;
+  private running = false;
+  private raf = 0;
+  private lastFrame = 0;
+  private seenEvents = 0;
+
+  private renderer: Renderer;
+  private camera = new OrbitCamera();
+  private canvas: HTMLCanvasElement;
+
+  private instances: PartInstance[] = [];
+  private trail: { x: number; y: number }[] = [];
+  private lastTrailT = -1;
+  private geomLength = 20;
+  private landAp = new LandingAutopilot();
+  private autoLand = false;
+  private frameCount = 0;
+  /** Impact predictor result: sim-plane angle + seconds from now. */
+  private impact: { angle: number; dt: number } | null = null;
+
+  private hudValues = new Map<string, HTMLElement>();
+  private propFill!: HTMLElement;
+  private landingPanel!: HTMLElement;
+  private banner!: HTMLElement;
+  private feed!: HTMLElement;
+  private launchBtn!: HTMLButtonElement;
+  private apBtn!: HTMLButtonElement;
+  private warpLabel!: HTMLElement;
+  private throttleSlider!: HTMLInputElement;
+
+  constructor(
+    private root: HTMLElement,
+    compiled: Compiled,
+    craft: Craft,
+    private targetAltitude = 250_000,
+    private onExit?: () => void,
+  ) {
+    this.sim = new Sim(compiled.vehicle);
+    this.ap = new Autopilot(defaultPlan(targetAltitude, this.sim.body));
+
+    // Flatten the craft to renderable instances with burn-order indices.
+    const burnIndex = new Map<string, number>();
+    compiled.stages.forEach((cs, i) => cs.partIds.forEach((id) => burnIndex.set(id, i)));
+    for (const [id, pl] of placements(craft)) {
+      for (const inst of pl.instances) {
+        this.instances.push({
+          partId: id,
+          defId: pl.def.id,
+          isFin: !!pl.def.fin,
+          isLeg: pl.def.kind === 'leg',
+          height: pl.def.height,
+          burnIndex: burnIndex.get(id) ?? 0,
+          x: inst.x,
+          y: inst.y,
+          z: inst.z,
+          angle: inst.angle,
+          color: pl.def.color,
+          engine: pl.def.kind === 'engine',
+          exitRadius: pl.def.radiusBottom,
+        });
+      }
+    }
+
+    root.innerHTML = '';
+    root.className = 'flight';
+    this.canvas = document.createElement('canvas');
+    root.appendChild(this.canvas);
+    this.renderer = new Renderer(this.canvas);
+    for (const def of PARTS) {
+      const f = def.fin;
+      this.renderer.mesh(def.id, () =>
+        f ? finMesh(f.cr, f.ct, f.span, f.sweep, f.thickness) : segmentsMesh(def.segments),
+      );
+    }
+    this.renderer.mesh('planet', () => sphereMesh(48, 72, terrainColor));
+    this.renderer.mesh('shell', () => sphereMesh(24, 36));
+    this.renderer.mesh('plume', () => segmentsMesh([{ y0: -1, y1: 0, r0: 0.45, r1: 1 }]));
+    this.renderer.mesh('pad', () => segmentsMesh([{ y0: 0, y1: 1, r0: 1, r1: 0 }]));
+    this.renderer.mesh('padDisc', () => segmentsMesh([{ y0: -1, y1: 0, r0: 1, r1: 1 }]));
+    this.renderer.mesh('canopy', () => sphereMesh(12, 18));
+    this.renderer.mesh('arrow', () =>
+      segmentsMesh([
+        { y0: 0, y1: 0.8, r0: 0.02, r1: 0.02 },
+        { y0: 0.8, y1: 1, r0: 0.07, r1: 0 },
+      ]),
+    );
+
+    this.geomLength = compiled.geometry.length;
+    this.camera.minDist = 8;
+    this.camera.maxDist = 6e7;
+    // Open framing the whole vehicle, whatever its size.
+    this.camera.dist = Math.max(55, this.geomLength * 2.1);
+    this.camera.yaw = 0.9;
+    this.camera.pitch = 0.15;
+    this.camera.attach(root, () => {});
+    this.attachSteering(root);
+
+    this.buildHud();
+    this.buildControls();
+    window.addEventListener('keydown', this.onKey);
+    new ResizeObserver(() => this.resize()).observe(root);
+    this.resize();
+    this.lastFrame = performance.now();
+    this.raf = requestAnimationFrame(this.frame);
+  }
+
+  destroy(): void {
+    cancelAnimationFrame(this.raf);
+    window.removeEventListener('keydown', this.onKey);
+  }
+
+  // ---------- DOM ----------
+
+  private buildHud(): void {
+    const hud = document.createElement('div');
+    hud.className = 'hud';
+    const flight = document.createElement('div');
+    flight.className = 'panel';
+    flight.innerHTML = '<h3>Flight</h3>';
+    const grid = document.createElement('div');
+    grid.className = 'readouts';
+    flight.appendChild(grid);
+    const rows: [string, string][] = [
+      ['met', 'MET'],
+      ['phase', 'Phase'],
+      ['alt', 'Altitude'],
+      ['air', 'Airspeed'],
+      ['orb', 'Orbital vel'],
+      ['ap', 'Apoapsis'],
+      ['pe', 'Periapsis'],
+      ['tapo', 'Time to Ap'],
+      ['twr', 'TWR'],
+      ['throttle', 'Throttle'],
+      ['q', 'Dyn press'],
+      ['mach', 'Mach'],
+      ['aoa', 'AoA'],
+      ['margin', 'Stability'],
+      ['gimbal', 'Gimbal'],
+    ];
+    for (const [key, label] of rows) {
+      const l = document.createElement('div');
+      l.className = 'label';
+      l.textContent = label;
+      const v = document.createElement('div');
+      v.className = 'value';
+      grid.appendChild(l);
+      grid.appendChild(v);
+      this.hudValues.set(key, v);
+    }
+    const propPanel = document.createElement('div');
+    propPanel.className = 'panel';
+    propPanel.innerHTML = '<h3>Propellant</h3>';
+    const propLabel = document.createElement('div');
+    propLabel.className = 'value';
+    this.hudValues.set('prop', propLabel);
+    const bar = document.createElement('div');
+    bar.className = 'prop-bar';
+    this.propFill = document.createElement('div');
+    bar.appendChild(this.propFill);
+    propPanel.appendChild(propLabel);
+    propPanel.appendChild(bar);
+    hud.appendChild(flight);
+    hud.appendChild(propPanel);
+
+    // Landing instruments: appear during descent. Radar altitude is above
+    // the actual surface under the vehicle, distinct from CoM altitude.
+    this.landingPanel = document.createElement('div');
+    this.landingPanel.className = 'panel';
+    this.landingPanel.style.display = 'none';
+    this.landingPanel.innerHTML = '<h3>Landing</h3>';
+    const lgrid = document.createElement('div');
+    lgrid.className = 'readouts';
+    this.landingPanel.appendChild(lgrid);
+    const lrows: [string, string][] = [
+      ['radar', 'Radar alt'],
+      ['vspd', 'V speed'],
+      ['hspd', 'H speed'],
+      ['ltilt', 'Tilt'],
+      ['burnalt', 'Burn alt'],
+      ['impact', 'Impact in'],
+      ['gear', 'Gear/chute'],
+    ];
+    for (const [key, label] of lrows) {
+      const l = document.createElement('div');
+      l.className = 'label';
+      l.textContent = label;
+      const v = document.createElement('div');
+      v.className = 'value';
+      lgrid.appendChild(l);
+      lgrid.appendChild(v);
+      this.hudValues.set(key, v);
+    }
+    hud.appendChild(this.landingPanel);
+
+    this.feed = document.createElement('div');
+    this.feed.className = 'panel event-feed';
+    hud.appendChild(this.feed);
+    this.root.appendChild(hud);
+
+    this.banner = document.createElement('div');
+    this.banner.className = 'banner';
+    this.banner.style.display = 'none';
+    this.root.appendChild(this.banner);
+  }
+
+  private buildControls(): void {
+    const bar = document.createElement('div');
+    bar.className = 'controls';
+    const panel = document.createElement('div');
+    panel.className = 'panel';
+    panel.style.display = 'flex';
+    panel.style.gap = '8px';
+    panel.style.alignItems = 'center';
+
+    if (this.onExit) {
+      const back = document.createElement('button');
+      back.textContent = '◂ VAB';
+      back.onclick = () => this.onExit!();
+      panel.appendChild(back);
+    }
+    this.launchBtn = document.createElement('button');
+    this.launchBtn.className = 'primary';
+    this.launchBtn.textContent = 'Launch';
+    this.launchBtn.onclick = () => this.launch();
+    this.apBtn = document.createElement('button');
+    this.apBtn.textContent = 'Autopilot: on';
+    this.apBtn.onclick = () => this.toggleAutopilot();
+    const stageBtn = document.createElement('button');
+    stageBtn.textContent = 'Stage (space)';
+    stageBtn.onclick = () => this.sim.stage();
+    const warpDown = document.createElement('button');
+    warpDown.textContent = '−';
+    warpDown.onclick = () => this.setWarp(this.warpIndex - 1);
+    this.warpLabel = document.createElement('span');
+    this.warpLabel.className = 'value';
+    this.warpLabel.style.minWidth = '52px';
+    this.warpLabel.style.textAlign = 'center';
+    this.warpLabel.textContent = '1×';
+    const warpUp = document.createElement('button');
+    warpUp.textContent = '+';
+    warpUp.onclick = () => this.setWarp(this.warpIndex + 1);
+
+    // Throttle slider: live in manual; mirrors the autopilot's command
+    // when the autopilot owns the throttle.
+    const thr = document.createElement('input');
+    thr.type = 'range';
+    thr.min = '0';
+    thr.max = '100';
+    thr.value = '100';
+    thr.className = 'throttle-slider';
+    thr.oninput = () => {
+      if (!this.autopilotOn) this.sim.throttle = Number(thr.value) / 100;
+    };
+    this.throttleSlider = thr;
+
+    const legsBtn = document.createElement('button');
+    legsBtn.textContent = 'Legs (G)';
+    legsBtn.onclick = () => this.sim.deployLegs();
+    const chuteBtn = document.createElement('button');
+    chuteBtn.textContent = 'Chute (P)';
+    chuteBtn.onclick = () => this.sim.deployChutes();
+    const landBtn = document.createElement('button');
+    landBtn.textContent = 'Auto-land: off';
+    landBtn.onclick = () => {
+      this.autoLand = !this.autoLand;
+      if (this.autoLand && this.autopilotOn) this.toggleAutopilot();
+      landBtn.textContent = `Auto-land: ${this.autoLand ? 'on' : 'off'}`;
+    };
+
+    panel.append(this.launchBtn, this.apBtn, landBtn, stageBtn, legsBtn, chuteBtn, thr, warpDown, this.warpLabel, warpUp);
+    bar.appendChild(panel);
+
+    const hint = document.createElement('div');
+    hint.className = 'vab-hint';
+    hint.style.bottom = '62px';
+    hint.textContent = 'space: launch/stage · A: autopilot · ← →: pitch · ↑ ↓: throttle · Z/X: full/cut · , .: warp · drag: orbit · wheel: zoom';
+    this.root.appendChild(hint);
+    this.root.appendChild(bar);
+  }
+
+  private launch(): void {
+    if (this.running) return;
+    this.running = true;
+    this.launchBtn.disabled = true;
+  }
+
+  /** Right-drag steering: pitch the commanded attitude in the orbital
+   * plane (the sim is 3-DOF planar; steering input maps to in-plane
+   * pitch, the one axis that exists). */
+  private attachSteering(root: HTMLElement): void {
+    root.addEventListener('contextmenu', (e) => e.preventDefault());
+    let lastX: number | null = null;
+    root.addEventListener('mousedown', (e) => {
+      if (e.button === 2) lastX = e.clientX;
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (lastX === null) return;
+      const dx = e.clientX - lastX;
+      lastX = e.clientX;
+      if (this.autopilotOn) this.toggleAutopilot(); // manual takeover
+      this.manualPitch = Math.min(Math.PI, Math.max(-Math.PI, this.manualPitch + dx * 0.003));
+      this.sim.attitude = { mode: 'pitch', angle: this.manualPitch };
+    });
+    window.addEventListener('mouseup', (e) => {
+      if (e.button === 2) lastX = null;
+    });
+  }
+
+  private toggleAutopilot(): void {
+    this.autopilotOn = !this.autopilotOn;
+    this.apBtn.textContent = `Autopilot: ${this.autopilotOn ? 'on' : 'off'}`;
+    if (!this.autopilotOn) {
+      // Take over smoothly at the current commanded pitch.
+      const upA = Math.atan2(this.sim.state.r.y, this.sim.state.r.x);
+      this.manualPitch = Math.abs(this.sim.targetAngle() - upA);
+      this.sim.attitude = { mode: 'pitch', angle: this.manualPitch };
+    }
+  }
+
+  private setWarp(i: number): void {
+    this.warpIndex = Math.min(WARP_STEPS.length - 1, Math.max(0, i));
+    this.warpLabel.textContent = `${WARP_STEPS[this.warpIndex]}×`;
+  }
+
+  private onKey = (e: KeyboardEvent): void => {
+    if (e.key === ' ') {
+      e.preventDefault();
+      if (!this.running) this.launch();
+      else this.sim.stage();
+    } else if (e.key === '.') this.setWarp(this.warpIndex + 1);
+    else if (e.key === ',') this.setWarp(this.warpIndex - 1);
+    else if (e.key === 'a') this.toggleAutopilot();
+    else if (e.key === 'g') this.sim.deployLegs();
+    else if (e.key === 'p') this.sim.deployChutes();
+    else if (!this.autopilotOn) {
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        this.manualPitch = Math.min(
+          Math.PI,
+          Math.max(-Math.PI, this.manualPitch + ((e.key === 'ArrowRight' ? 1 : -1) * Math.PI) / 90),
+        );
+        this.sim.attitude = { mode: 'pitch', angle: this.manualPitch };
+      } else if (e.key === 'ArrowUp') this.sim.throttle = Math.min(1, this.sim.throttle + 0.1);
+      else if (e.key === 'ArrowDown') this.sim.throttle = Math.max(0, this.sim.throttle - 0.1);
+      else if (e.key === 'z') this.sim.throttle = 1;
+      else if (e.key === 'x') this.sim.throttle = 0;
+    }
+  };
+
+  // ---------- loop ----------
+
+  private frame = (now: number): void => {
+    const wallDt = Math.min(0.1, (now - this.lastFrame) / 1000);
+    this.lastFrame = now;
+    const s = this.sim;
+    const atmTop = s.body.atmosphere?.topAltitude ?? 0;
+
+    if (this.running && !s.crashed) {
+      let toAdvance = wallDt * WARP_STEPS[this.warpIndex]!;
+      let ticks = 0;
+      while (toAdvance > 1e-9 && ticks < 2000) {
+        if (this.autopilotOn) this.ap.update(s);
+        else if (this.autoLand) this.landAp.update(s);
+        const coasting = !s.burning && s.actualThrottle < 0.01 && s.altitude > atmTop;
+        const dt = Math.min(toAdvance, coasting ? Math.max(1, toAdvance / 4) : 0.25);
+        s.step(dt);
+        toAdvance -= dt;
+        ticks++;
+        if (s.state.t - this.lastTrailT > 0.5) {
+          this.lastTrailT = s.state.t;
+          this.trail.push({ x: s.state.r.x, y: s.state.r.y });
+          if (this.trail.length > 4000) this.trail.splice(0, 1000);
+        }
+      }
+    }
+
+    this.pumpEvents();
+    if (++this.frameCount % 15 === 0) this.updateImpactPrediction();
+    const pRatio = s.body.atmosphere ? s.body.atmosphere.pressure(Math.max(0, s.altitude)) / P0_SEA_LEVEL : 0;
+    this.draw(pRatio);
+    this.updateHud();
+    this.raf = requestAnimationFrame(this.frame);
+  };
+
+  /**
+   * Impact predictor: forward-integrate the current state (no thrust,
+   * current drag config incl. deployed chutes) until it meets the surface.
+   * Runs every 15th frame; a few hundred coarse RK2 steps is plenty.
+   */
+  private updateImpactPrediction(): void {
+    const s = this.sim;
+    this.impact = null;
+    if (!this.running || s.landed || s.crashed || s.hasLanded) return;
+    const el = s.elements;
+    if (el.e < 1 && el.rPeri > s.body.radius) return; // not coming down
+    if (s.altitude > 400_000) return;
+    const atm = s.body.atmosphere;
+    const mu = s.body.mu;
+    const R = s.body.radius;
+    const rot = s.body.rotationRate;
+    const cdA0 = s.vehicle.cd * s.vehicle.area;
+    const chuteA = s.activeChutes().reduce((sum, c) => sum + c.cdA, 0);
+    let r = { ...s.state.r };
+    let v = { ...s.state.v };
+    const m = s.state.m;
+    let t = 0;
+    for (let i = 0; i < 3000; i++) {
+      const rn = norm(r);
+      const alt = rn - R;
+      if (alt <= 0) {
+        this.impact = { angle: Math.atan2(r.y, r.x), dt: t };
+        return;
+      }
+      const vr = (r.x * v.x + r.y * v.y) / rn;
+      const dt = Math.max(0.25, Math.min(6, alt / (2 * Math.abs(vr) + 20)));
+      // RK2 midpoint with gravity + drag (prediction, not simulation).
+      const accAt = (rr: typeof r, vv: typeof v) => {
+        const rrn = norm(rr);
+        let a = scale(rr, -mu / (rrn * rrn * rrn));
+        const h = rrn - R;
+        if (atm && h < atm.topAltitude) {
+          const air = sub(vv, scale(perp(rr), rot));
+          const speed = norm(air);
+          if (speed > 0.1) {
+            const q = 0.5 * atm.density(Math.max(0, h)) * speed * speed;
+            const cdA = cdA0 * machDragFactor(speed / speedOfSound(Math.max(0, h))) + chuteA;
+            a = add(a, scale(air, (-q * cdA) / (speed * m)));
+          }
+        }
+        return a;
+      };
+      const a1 = accAt(r, v);
+      const rm = add(r, scale(v, dt / 2));
+      const vm = add(v, scale(a1, dt / 2));
+      const a2 = accAt(rm, vm);
+      r = add(r, scale(vm, dt));
+      v = add(v, scale(a2, dt));
+      t += dt;
+      if (t > 3_600) return; // not impacting within the hour
+    }
+  }
+
+  private pumpEvents(): void {
+    const evs = this.sim.events;
+    for (; this.seenEvents < evs.length; this.seenEvents++) {
+      const ev = evs[this.seenEvents]!;
+      let text = '';
+      switch (ev.type) {
+        case 'liftoff':
+          text = 'Liftoff';
+          break;
+        case 'stageBurnout':
+          text = `Stage ${ev.stage + 1} burnout`;
+          break;
+        case 'stageSeparation':
+          text = `Stage ${ev.stage + 1} separation`;
+          break;
+        case 'partTorn':
+          text = `⚠ ${ev.partName} torn off — dynamic pressure`;
+          break;
+        case 'breakup':
+          text = `Vehicle destroyed — q = ${(ev.q / 1000).toFixed(0)} kPa`;
+          break;
+        case 'orbit':
+          text = 'Orbit achieved';
+          break;
+        case 'crash':
+          text = `Impact at ${fmtSpeed(ev.speed)}`;
+          break;
+      }
+      const div = document.createElement('div');
+      div.textContent = `T+${fmtTime(ev.t)}  ${text}`;
+      this.feed.prepend(div);
+      while (this.feed.children.length > 5) this.feed.lastChild?.remove();
+    }
+  }
+
+  // ---------- rendering ----------
+
+  private resize(): void {
+    const dpr = window.devicePixelRatio || 1;
+    this.canvas.width = this.root.clientWidth * dpr;
+    this.canvas.height = this.root.clientHeight * dpr;
+    this.canvas.style.width = `${this.root.clientWidth}px`;
+    this.canvas.style.height = `${this.root.clientHeight}px`;
+  }
+
+  /** Sim plane → 3D world: the launch site (sim +x) is the top of the
+   * sphere so local vertical reads as screen-up; sim +y (downrange east)
+   * maps to world +x. (A mirror of the plane — visual only.) */
+  private toWorld(x: number, y: number): { x: number; y: number; z: number } {
+    return { x: y, y: x, z: 0 };
+  }
+
+  private draw(pRatio: number): void {
+    const s = this.sim;
+    const w = this.canvas.clientWidth || 1;
+    const h = this.canvas.clientHeight || 1;
+    const rocketW = this.toWorld(s.state.r.x, s.state.r.y);
+    this.camera.target = v3(rocketW.x, rocketW.y, rocketW.z);
+
+    const near = Math.max(0.5, this.camera.dist * 0.02);
+    const far = Math.max(1e5, this.camera.dist * 40 + 2 * s.body.radius + 8e8);
+    // Sky: blends from ground blue through stratospheric dark to space
+    // black as the vehicle climbs out of the atmosphere.
+    const skyF = Math.pow(Math.max(0, 1 - s.altitude / 75_000), 1.6);
+    const clear: [number, number, number] = [
+      0.01 + 0.33 * skyF,
+      0.012 + 0.5 * skyF,
+      0.03 + 0.72 * skyF,
+    ];
+    this.renderer.begin(this.camera.proj(w / h, near, far), this.camera.viewRot(), this.camera.eye(), clear);
+
+    // Planet: terrain-colored sphere rotating with the body (β = −ωt under
+    // the plane mapping), plus haze shells at the USSA76 layer scales.
+    const spin = rotationZ(-s.body.rotationRate * s.state.t);
+    this.renderer.draw('planet', multiply(spin, scaling(s.body.radius)), [1, 1, 1]);
+    if (s.body.atmosphere) {
+      this.renderer.draw('shell', scaling(s.body.radius + 12_000), [0.55, 0.7, 0.9], 0.1);
+      this.renderer.draw('shell', scaling(s.body.radius + 45_000), [0.4, 0.6, 0.95], 0.07);
+      this.renderer.draw('shell', scaling(s.body.radius + 90_000), [0.3, 0.5, 0.95], 0.05);
+    }
+
+    // Sibling bodies (the moon): rendered in the sky at their orbital
+    // position — patched-conic SOI transitions are future work; today the
+    // sim's gravity is single-body and this is scenery with real ephemeris.
+    for (const b of BODIES) {
+      if (b.parent !== s.body.id || !b.orbit) continue;
+      const n = Math.sqrt(s.body.mu / (b.orbit.a ** 3));
+      const ang = b.orbit.phase0 + n * s.state.t;
+      const bw = this.toWorld(b.orbit.a * Math.cos(ang), b.orbit.a * Math.sin(ang));
+      this.renderer.draw(
+        'shell',
+        multiply(translation(bw.x, bw.y, bw.z), scaling(b.radius)),
+        [0.62, 0.6, 0.58],
+      );
+    }
+
+    // Launch pad (rotates with the body): a platform up close, a beacon
+    // cone when zoomed out to map scales.
+    const padA = s.body.rotationRate * s.state.t;
+    const padW = this.toWorld(s.body.radius * Math.cos(padA), s.body.radius * Math.sin(padA));
+    if (this.camera.dist < 3_000) {
+      const padModel = multiply(
+        multiply(translation(padW.x, padW.y, padW.z), rotationZ(-padA)),
+        scalingXYZ(22, 0.4, 22),
+      );
+      this.renderer.draw('padDisc', padModel, [0.3, 0.32, 0.36]);
+    } else {
+      const padScale = this.camera.dist * 0.012;
+      this.renderer.draw(
+        'pad',
+        multiply(translation(padW.x, padW.y, padW.z), scaling(padScale)),
+        [1.0, 0.78, 0.34],
+        1,
+        true,
+      );
+    }
+
+    // Orbit line + trail, rebased to the vehicle for float precision.
+    const el = s.elements;
+    if (el.e < 1 && el.rApo > s.body.radius * 0.5) {
+      const pts = new Float32Array(129 * 3);
+      const p = el.a * (1 - el.e * el.e);
+      for (let i = 0; i <= 128; i++) {
+        const nu = (i / 128) * 2 * Math.PI;
+        const rad = p / (1 + el.e * Math.cos(nu));
+        const ang = el.argPeri + (el.h >= 0 ? nu : -nu);
+        const wpt = this.toWorld(rad * Math.cos(ang), rad * Math.sin(ang));
+        pts[i * 3] = wpt.x - rocketW.x;
+        pts[i * 3 + 1] = wpt.y - rocketW.y;
+        pts[i * 3 + 2] = wpt.z - rocketW.z;
+      }
+      this.renderer.updateLines('orbit', pts);
+      this.renderer.draw(
+        'orbit',
+        translation(rocketW.x, rocketW.y, rocketW.z),
+        s.inOrbit ? [0.35, 0.85, 0.55] : [0.45, 0.65, 0.95],
+        0.9,
+        true,
+      );
+    }
+    if (this.trail.length > 1) {
+      const pts = new Float32Array(this.trail.length * 3);
+      for (let i = 0; i < this.trail.length; i++) {
+        const wpt = this.toWorld(this.trail[i]!.x, this.trail[i]!.y);
+        pts[i * 3] = wpt.x - rocketW.x;
+        pts[i * 3 + 1] = wpt.y - rocketW.y;
+        pts[i * 3 + 2] = wpt.z - rocketW.z;
+      }
+      this.renderer.updateLines('trail', pts);
+      this.renderer.draw('trail', translation(rocketW.x, rocketW.y, rocketW.z), [0.55, 0.6, 0.75], 0.5, true);
+    }
+
+    // The vehicle: actual part meshes at the simulated attitude. The sim's
+    // point mass is the CoM; the stack is offset so the CoM sits at r.
+    // Body axis (cos θ, sin θ) in the sim plane → world: local +y of the
+    // part stack rotated by rotationZ(−θ) under the plane mapping above.
+    const yCoM = s.massProps.yCoM;
+    const att = multiply(
+      translation(rocketW.x, rocketW.y, rocketW.z),
+      rotationZ(-s.state.theta),
+    );
+    for (const inst of this.instances) {
+      if (inst.burnIndex < s.stageIndex || s.torn.has(inst.partId)) continue;
+      let local = multiply(translation(inst.x, inst.y - yCoM, inst.z), rotationY(-inst.angle));
+      // Deployed legs splay outward, pivoting at the strut top.
+      if (inst.isLeg && s.legsDeployed) {
+        const pivot = multiply(
+          multiply(translation(0, inst.height, 0), rotationZ(-(50 * Math.PI) / 180)),
+          translation(0, -inst.height, 0),
+        );
+        local = multiply(local, pivot);
+      }
+      this.renderer.draw(inst.defId, multiply(att, local), inst.color);
+
+      // Plume: widens as ambient pressure drops, flickers with combustion.
+      if (inst.engine && inst.burnIndex === s.stageIndex && s.actualThrottle > 0.02 && !s.crashed) {
+        const widen = 1 + 1.6 * (1 - pRatio);
+        const len = inst.exitRadius * 9 * s.actualThrottle * (0.92 + Math.random() * 0.16);
+        const plumeLocal = multiply(
+          translation(inst.x, inst.y - yCoM, inst.z),
+          scalingXYZ(inst.exitRadius * widen, len, inst.exitRadius * widen),
+        );
+        this.renderer.draw('plume', multiply(att, plumeLocal), [1.0, 0.72, 0.35], 0.65, true);
+      }
+    }
+
+    // Deployed parachute canopies above the stack.
+    for (const c of s.activeChutes()) {
+      const r = Math.min(14, Math.max(2.5, Math.sqrt(c.cdA) / 3));
+      const canopyLocal = multiply(
+        translation(0, c.y - yCoM + r * 1.9, 0),
+        scalingXYZ(r, r * 0.55, r),
+      );
+      this.renderer.draw('canopy', multiply(att, canopyLocal), [0.9, 0.45, 0.2], 0.92);
+    }
+
+    // Steering indicators: commanded attitude (cyan) and airspeed (green).
+    if (this.running && !s.landed && !s.crashed) {
+      const L = this.geomLength * 1.1;
+      const tgt = s.targetAngle();
+      const tgtM = multiply(
+        translation(rocketW.x, rocketW.y, rocketW.z),
+        multiply(rotationZ(-tgt), scalingXYZ(1, L, 1)),
+      );
+      this.renderer.draw('arrow', tgtM, [0.4, 0.85, 1.0], 0.55, true);
+      const air = s.airspeedVec;
+      if (norm(air) > 2) {
+        const airA = Math.atan2(air.y, air.x);
+        const airM = multiply(
+          translation(rocketW.x, rocketW.y, rocketW.z),
+          multiply(rotationZ(-airA), scalingXYZ(1, L * 0.85, 1)),
+        );
+        this.renderer.draw('arrow', airM, [0.45, 0.95, 0.55], 0.45, true);
+      }
+    }
+
+    // Impact predictor marker.
+    if (this.impact) {
+      const iw = this.toWorld(
+        s.body.radius * Math.cos(this.impact.angle),
+        s.body.radius * Math.sin(this.impact.angle),
+      );
+      const sc = Math.max(8, this.camera.dist * 0.014);
+      this.renderer.draw(
+        'pad',
+        multiply(translation(iw.x, iw.y, iw.z), scaling(sc)),
+        [1.0, 0.3, 0.3],
+        0.95,
+        true,
+        true,
+      );
+    }
+  }
+
+  // ---------- HUD ----------
+
+  private set(key: string, text: string, cls = ''): void {
+    const el = this.hudValues.get(key)!;
+    el.textContent = text;
+    el.className = `value ${cls}`;
+  }
+
+  private updateHud(): void {
+    const s = this.sim;
+    const el = s.elements;
+    const atmTop = s.body.atmosphere?.topAltitude ?? 0;
+    const stage = s.vehicle.stages[s.stageIndex];
+    this.set('met', `T+ ${fmtTime(s.state.t)}`);
+    this.set('phase', s.crashed ? 'LOST' : this.autopilotOn ? this.ap.phase : 'manual');
+    this.set('alt', fmtDistance(s.altitude));
+    this.set('air', fmtSpeed(norm(s.airspeedVec)));
+    this.set('orb', fmtSpeed(norm(s.state.v)));
+    const apAlt = el.rApo - s.body.radius;
+    const peAlt = el.rPeri - s.body.radius;
+    this.set('ap', el.e >= 1 ? 'escape' : fmtDistance(apAlt), apAlt > this.targetAltitude * 0.98 ? 'good' : '');
+    this.set('pe', fmtDistance(peAlt), peAlt > atmTop ? 'good' : peAlt > 0 ? 'warn' : 'bad');
+    this.set('tapo', fmtTime(el.timeToApo));
+
+    const props = s.massProps;
+    const surfaceG = s.body.mu / (s.body.radius * s.body.radius);
+    let twr = 0;
+    if (stage && s.actualThrottle > 0) {
+      // Display TWR from current acceleration capability.
+      twr =
+        (s.actualThrottle *
+          stage.engines.reduce((sum, g) => sum + g.engine.thrustVac * g.count, 0)) /
+        (s.state.m * surfaceG);
+    }
+    this.set('twr', twr.toFixed(2), twr > 0 && twr < 1 ? 'warn' : '');
+    this.set('throttle', `${Math.round(s.throttle * 100)} % → ${Math.round(s.actualThrottle * 100)} %`);
+    if (this.autopilotOn) this.throttleSlider.value = String(Math.round(s.throttle * 100));
+    this.set('q', `${(s.q / 1000).toFixed(1)} kPa`, s.q > 60_000 ? 'warn' : '');
+    this.set('mach', s.mach > 0.05 ? s.mach.toFixed(2) : '—', s.mach > 0.85 && s.mach < 1.3 ? 'warn' : '');
+    this.set('aoa', `${((s.aoa * 180) / Math.PI).toFixed(1)}°`, Math.abs(s.aoa) > 0.15 && s.q > 5_000 ? 'warn' : '');
+    const margin = props.staticMarginCal;
+    this.set(
+      'margin',
+      props.cnAlpha > 0 ? `${margin.toFixed(1)} cal` : '—',
+      s.q > 1_000 ? (margin >= 0.2 ? 'good' : margin >= 0 ? 'warn' : 'bad') : '',
+    );
+    this.set('gimbal', `${((s.gimbal * 180) / Math.PI).toFixed(1)}°`);
+
+    if (stage) {
+      const full = stage.tanks.reduce((sum, t) => sum + t.propellantMass, 0);
+      this.set('prop', `Stage ${s.stageIndex + 1}: ${fmtMass(s.propellant)}`);
+      this.propFill.style.width = full > 0 ? `${(100 * s.propellant) / full}%` : '0%';
+    } else {
+      this.set('prop', 'no stages left');
+      this.propFill.style.width = '0%';
+    }
+
+    // Landing panel: live during descent (or auto-land), with per-limit
+    // margin coloring against the active touchdown mode.
+    const descending = this.running && !s.landed && s.vSpeed > 0 && s.altitude < 20_000;
+    if (descending || this.autoLand || s.hasLanded) {
+      this.landingPanel.style.display = 'block';
+      const mode = s.legFootprint() > 0 ? 'legs' : s.activeChutes().length > 0 ? 'chute' : 'none';
+      const lim = TOUCHDOWN_LIMITS[mode];
+      const radar = s.radarAltitude;
+      this.set('radar', fmtDistance(Math.max(0, radar)));
+      this.set('vspd', `${s.vSpeed.toFixed(1)} m/s`, s.vSpeed > lim.vSpeed ? 'bad' : s.vSpeed > lim.vSpeed * 0.7 ? 'warn' : 'good');
+      this.set('hspd', `${s.hSpeed.toFixed(1)} m/s`, s.hSpeed > lim.hSpeed ? 'bad' : s.hSpeed > lim.hSpeed * 0.7 ? 'warn' : 'good');
+      const tiltDeg = (s.tilt * 180) / Math.PI;
+      const tiltLim = (lim.tilt * 180) / Math.PI;
+      this.set('ltilt', `${tiltDeg.toFixed(1)}°`, tiltDeg > tiltLim ? 'bad' : tiltDeg > tiltLim * 0.7 ? 'warn' : 'good');
+      const hBurn = s.suicideBurnAltitude;
+      this.set(
+        'burnalt',
+        isFinite(hBurn) ? fmtDistance(hBurn) : '—',
+        isFinite(hBurn) && radar < hBurn * 1.15 ? (radar < hBurn ? 'bad' : 'warn') : '',
+      );
+      this.set('impact', this.impact ? fmtTime(this.impact.dt) : '—');
+      this.set(
+        'gear',
+        `${s.legFootprint() > 0 ? 'legs ✓' : this.sim.legsDeployed ? 'no legs' : 'stowed'} · ${
+          s.activeChutes().length > 0 ? 'chute ✓' : 'no chute'
+        }`,
+      );
+    } else {
+      this.landingPanel.style.display = 'none';
+    }
+
+    if (s.crashed) {
+      const failEv = this.sim.events.find((e) => e.type === 'landingFailed');
+      this.showBanner(
+        failEv ? 'Landing failed' : this.sim.events.some((e) => e.type === 'breakup') ? 'Breakup' : 'Crashed',
+        'crash',
+      );
+    } else if (s.hasLanded) this.showBanner('Landed', 'orbit');
+    else if (s.inOrbit) this.showBanner('Orbit', 'orbit');
+  }
+
+  private showBanner(text: string, cls: string): void {
+    this.banner.textContent = text;
+    this.banner.className = `banner ${cls}`;
+    this.banner.style.display = 'block';
+  }
+}
