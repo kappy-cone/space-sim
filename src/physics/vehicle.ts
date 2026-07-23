@@ -47,6 +47,41 @@ export interface Engine {
   thrustCurve?: [number, number][];
   /** Extendable nozzle (RL10B-2): stowed performance until deployed. */
   nozzleExtension?: { stowedExpansionRatio: number; stowedIspVac: number; stowedMaxAmbientPressure: number };
+  /** Air-breathing engine: thrust = thrustSL·(ρ/ρ₀)·f(M) — first-order
+   * density lapse with a per-engine Mach shape (Anderson, Aircraft
+   * Performance and Design §3.5; Mattingly, Elements of Gas Turbine
+   * Propulsion). Fuel-only mass flow ṁ = tsfc·T; no oxidizer aboard.
+   * Set thrustVac = thrustSL and ispVac = ispSL = 1/(tsfc·g₀) so the
+   * stage aggregates (Δv walk, ṁ) stay self-consistent at the
+   * reference point. */
+  airBreathing?: {
+    /** f(M) breakpoints [[Mach, thrust multiplier]] — the CD_MACH_TABLE
+     * pattern; linearly interpolated, clamped at the ends. */
+    machTable: [number, number][];
+    /** Below this Mach the engine cannot light or stay lit (ramjets
+     * need a boost). 0 for turbomachinery. */
+    minMach: number;
+    /** Above this Mach: flameout (inlet unstart / temperature limit). */
+    maxMach: number;
+    /** Below this air density [kg/m³]: flameout (the service ceiling). */
+    rhoFloor: number;
+    /** Thrust-specific fuel consumption [kg/(N·s)]. */
+    tsfc: number;
+  };
+}
+
+/** Linear interpolation over an air-breather's f(M) table (clamped). */
+export function machThrustFactor(table: [number, number][], mach: number): number {
+  if (table.length === 0) return 1;
+  if (mach <= table[0]![0]) return table[0]![1];
+  for (let i = 1; i < table.length; i++) {
+    if (mach <= table[i]![0]) {
+      const [m0, f0] = table[i - 1]!;
+      const [m1, f1] = table[i]!;
+      return f0 + ((f1 - f0) * (mach - m0)) / (m1 - m0 || 1e-9);
+    }
+  }
+  return table[table.length - 1]![1];
 }
 
 export interface Tank {

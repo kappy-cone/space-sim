@@ -301,6 +301,119 @@ export const ENGINES: readonly Engine[] = [
       [1, 0],
     ],
   },
+  // ---------------- air-breathing (plane class) ----------------
+  // Model: thrust = T_SL·(ρ/ρ₀)·f(M), ṁ = tsfc·T (fuel only — no
+  // oxidizer aboard, which is the entire point: fuel-only Isp = 3600/TSFC
+  // [lb/lbf/hr] runs ~20× a kerolox rocket). One TSFC per engine (its
+  // cruise/design value); low-speed fuel flow is overestimated by the
+  // single-number model — flagged, not hidden. ispVac = ispSL =
+  // 1/(tsfc·g₀) and thrustVac = thrustSL keep the stage aggregates
+  // self-consistent at the reference point. Three engines, three Mach
+  // bands, each provably winning in its own (docs/PARTS.md).
+  {
+    id: 'cfm56',
+    name: 'CFM56-5B4 turbofan',
+    propellant: 'jetfuel',
+    thrustSL: 120_100, // 27,000 lbf takeoff — EASA TCDS E.003 (CFM56-5B4)
+    thrustVac: 120_100, // = SL (the (ρ/ρ₀)·f(M) model owns the lapse)
+    ispSL: 6_605, // = 1/(tsfc·g₀) = 3600/0.545 hr⁻¹
+    ispVac: 6_605,
+    mass: 2_380, // dry — EASA TCDS E.003
+    vacuumOnly: false,
+    source:
+      'EASA TCDS E.003 (thrust, mass); cruise TSFC 0.545 lb/lbf/hr (type references) — single-TSFC model overestimates static fuel flow, flagged; f(M) anchored to published ~23–26 kN cruise thrust at M0.8/FL350, intermediate points ESTIMATED',
+    throttleable: true,
+    minThrottle: 0.05, // flight idle — ESTIMATE
+    ignitions: Infinity, // windmill/starter relight
+    gimbalDeg: 0,
+    expansionRatio: 1.1, // fan nozzle, near-unity — not meaningful for jets
+    maxAmbientPressure: Infinity,
+    ullageImmune: true, // pumps are shaft-driven; no settling requirement
+    airBreathing: {
+      // High-bypass ram-drag lapse. f(0.8) anchors the published cruise
+      // thrust (~23–26 kN at M0.8/FL350) IN THIS SIM'S ATMOSPHERE — the
+      // piecewise-exponential density model reads ~25% low at 11 km, so
+      // the table absorbs that bias rather than hiding it (the pinned
+      // calibration test is the contract; see engines.test.ts).
+      machTable: [
+        [0, 1],
+        [0.4, 0.88],
+        [0.8, 0.827],
+        [0.95, 0.78],
+      ],
+      minMach: 0,
+      maxMach: 0.95, // transonic fan/inlet limit (type operating envelope)
+      rhoFloor: 0.28, // ≈ 12.6 km — 737-class 41,000 ft ceiling (derived)
+      tsfc: 1.5437e-5, // 0.545 lb/lbf/hr → kg/(N·s)
+    },
+  },
+  {
+    id: 'j79',
+    name: 'J79-GE-17 turbojet (afterburning)',
+    propellant: 'jetfuel',
+    thrustSL: 79_620, // 17,900 lbf max afterburner — USAF/GE J79-17 data
+    thrustVac: 79_620,
+    ispSL: 1_832, // = 3600/1.965 hr⁻¹ (max A/B TSFC)
+    ispVac: 1_832,
+    mass: 1_745, // dry — GE J79 data
+    vacuumOnly: false,
+    source:
+      'GE/USAF J79-GE-17 published data (thrust, mass, A/B TSFC 1.965 lb/lbf/hr); modeled in max afterburner — its supersonic-band role; f(M) ram-thrust shape ESTIMATED from installed J79 curves',
+    throttleable: true,
+    minThrottle: 0.05, // ESTIMATE (mil power and below collapsed into one lever)
+    ignitions: Infinity,
+    gimbalDeg: 0,
+    expansionRatio: 1.5,
+    maxAmbientPressure: Infinity,
+    ullageImmune: true,
+    airBreathing: {
+      // Afterburning turbojet: ram recovery holds thrust up through M2.
+      machTable: [
+        [0, 1],
+        [1.0, 1.08],
+        [2.0, 1.25],
+        [2.2, 1.2],
+      ],
+      minMach: 0,
+      maxMach: 2.2, // F-4-class placard (inlet temperature limit)
+      rhoFloor: 0.115, // ≈ 18.3 km — F-4 service ceiling class (derived)
+      tsfc: 5.566e-5, // 1.965 lb/lbf/hr → kg/(N·s)
+    },
+  },
+  {
+    id: 'rj43',
+    name: 'RJ43-MA-3 ramjet',
+    propellant: 'jetfuel',
+    thrustSL: 50_000, // ~11–12,000 lbf class at design point — Marquardt Bomarc data, ESTIMATE within cited range
+    thrustVac: 50_000,
+    ispSL: 1_333, // = 3600/2.7 hr⁻¹
+    ispVac: 1_333,
+    mass: 300, // no turbomachinery — Bomarc/X-7 unit class, ESTIMATE
+    vacuumOnly: false,
+    source:
+      'Marquardt RJ43-MA-3 (Bomarc A; X-7 testbed reached M4.31): thrust class and mass ESTIMATED from cited ranges; ramjet TSFC ~2.7 lb/lbf/hr at M2.5+ (Mattingly, Elements of Gas Turbine Propulsion, ramjet class values) — ESTIMATE',
+    throttleable: true,
+    minThrottle: 0.5, // ramjets throttle poorly (fuel-flow stability) — ESTIMATE
+    ignitions: Infinity,
+    gimbalDeg: 0,
+    expansionRatio: 2,
+    maxAmbientPressure: Infinity,
+    ullageImmune: true,
+    airBreathing: {
+      // No static thrust: a ramjet needs ram compression. The BOOST TO
+      // LIGHT is the mechanic — carry another engine to Mach 1.8 first.
+      machTable: [
+        [1.8, 0.5],
+        [2.5, 1.0],
+        [3.5, 1.1],
+        [4.3, 0.9],
+      ],
+      minMach: 1.8, // light-off boost requirement (Bomarc boosted past M2)
+      maxMach: 4.3, // X-7/RJ43 flight record M4.31
+      rhoFloor: 0.018, // ≈ 30 km — X-7 class ceiling (derived)
+      tsfc: 7.648e-5, // 2.7 lb/lbf/hr → kg/(N·s)
+    },
+  },
 ];
 
 // ---------------- tanks (volume-first) ----------------

@@ -34,7 +34,9 @@ import { machDragFactor, speedOfSound } from './atmosphere';
 import { stallAngle, surfaceCoefficients } from './aero';
 import { Vec2, add, cross, dot, norm, perp, scale, sub, vec, fromAngle } from './vec2';
 import {
+  Engine,
   Vehicle,
+  machThrustFactor,
   massFlow,
   massFromStage,
   stageDryMass,
@@ -47,7 +49,7 @@ import {
   thrustCurveAt,
 } from './vehicle';
 import { propellantById } from './propellants';
-import { G0 } from './constants';
+import { G0, RHO0_SEA_LEVEL } from './constants';
 
 export type Attitude =
   | { mode: 'vertical' }
@@ -69,6 +71,7 @@ export type SimEvent =
   | { type: 'soiTransition'; t: number; from: string; to: string }
   | { type: 'ignitionFailed'; t: number; stage: number; limit: number }
   | { type: 'flameout'; t: number; stage: number }
+  | { type: 'jetFlameout'; t: number; stage: number; reason: string }
   | { type: 'engineDestroyed'; t: number; stage: number; reason: string }
   | { type: 'fairingJettisoned'; t: number }
   | { type: 'nozzleDeployed'; t: number; stage: number }
@@ -127,6 +130,11 @@ export class Sim {
   private pools0: number[] = [];
   /** Stages whose engines were destroyed (flow separation). */
   readonly engineFailed = new Set<number>();
+  /** Air-breathing stages currently flamed out (outside the Mach/density
+   * envelope). Cleared automatically when conditions return — jets
+   * windmill-relight; a real high-Mach restart procedure is not
+   * modeled (simplification, flagged). */
+  readonly jetOut = new Set<number>();
   private sepExposure = 0;
   /** Solid stages that have been lit (committed to burnout). */
   private readonly solidLit = new Set<number>();
@@ -149,6 +157,9 @@ export class Sim {
   q = 0;
   aoa = 0;
   mach = 0;
+  /** Current total thrust [N] at the actual throttle (readout — the HUD
+   * cannot reconstruct jet thrust from stage aggregates). */
+  thrustNow = 0;
   // Plane-class readouts (inert for rockets: no surfaces ⇒ never set).
   /** Commanded elevator deflection [rad] (per-step, gimbal pattern). */
   elevator = 0;
@@ -512,6 +523,7 @@ export class Sim {
       this.q = 0;
       this.aoa = 0;
       this.mach = 0;
+      this.thrustNow = 0;
       this.stallMargin = Infinity;
       this.stalled = false;
       this.stallSpeed = Infinity;
@@ -593,20 +605,78 @@ export class Sim {
   }
 
   /**
+   * Air-breathing thrust at the flow state, or null while flamed out
+   * (outside the Mach/density envelope). thrust = T_SL·(ρ/ρ₀)·f(M)
+   * (Anderson APD §3.5); ṁ = tsfc·T, fuel only. Flameout latches one
+   * named event per stage and clears when conditions return (windmill
+   * relight — a formal restart procedure is not modeled).
+   */
+  private jetOutput(
+    e: Engine,
+    count: number,
+    air: { rho: number; mach: number } | undefined,
+    stageIdx: number,
+  ): { thrust: number; mdot: number } | null {
+    const ab = e.airBreathing!;
+    const rho = air?.rho ?? 0;
+    const mach = air?.mach ?? 0;
+    let reason = '';
+    if (rho < ab.rhoFloor) reason = `air density ${rho.toFixed(3)} kg/m³ below the ${ab.rhoFloor} kg/m³ floor`;
+    else if (mach < ab.minMach) reason = `Mach ${mach.toFixed(2)} below light-off Mach ${ab.minMach}`;
+    else if (mach > ab.maxMach) reason = `Mach ${mach.toFixed(2)} above the Mach ${ab.maxMach} limit`;
+    if (reason) {
+      if (!this.jetOut.has(stageIdx) && this.throttle > 0) {
+        this.jetOut.add(stageIdx);
+        this.events.push({ type: 'jetFlameout', t: this.state.t, stage: stageIdx, reason });
+      }
+      return null;
+    }
+    this.jetOut.delete(stageIdx);
+    const thrust = e.thrustSL * (rho / RHO0_SEA_LEVEL) * machThrustFactor(ab.machTable, mach) * count;
+    return { thrust, mdot: ab.tsfc * thrust };
+  }
+
+  /**
    * Per-engine-group burn outputs at ambient pressure p: thrust and mass
    * flow at FULL throttle, the pool each group drains (first non-empty in
    * its crossfeed priority list), the flow-separation limit (stowed
    * nozzles separate earlier), and solid thrust-curve multipliers.
+   * Air-breathing engines additionally need the flow state `air`.
    */
-  private groupBurns(p: number): { thrust: number; mdot: number; pool: number; maxAmb: number; stage: number; spentSolid: boolean }[] {
+  private groupBurns(
+    p: number,
+    air?: { rho: number; mach: number },
+  ): { thrust: number; mdot: number; pool: number; maxAmb: number; stage: number; spentSolid: boolean }[] {
     const out: { thrust: number; mdot: number; pool: number; maxAmb: number; stage: number; spentSolid: boolean }[] = [];
     const stage = this.vehicle.stages[this.stageIndex];
     if (!stage) return out;
     const phase = this.vehicle.phases?.[this.stageIndex];
     if (!phase) {
+      if (this.engineFailed.has(this.stageIndex)) return out;
+      if (stage.engines.some((g) => g.engine.airBreathing)) {
+        // Jet-bearing hand-built stage: per-engine, jets through the
+        // envelope model, rockets at published performance.
+        let thrust = 0;
+        let mdot = 0;
+        let maxAmb = Infinity;
+        for (const g of stage.engines) {
+          if (g.engine.airBreathing) {
+            const jo = this.jetOutput(g.engine, g.count, air, this.stageIndex);
+            if (jo) {
+              thrust += jo.thrust;
+              mdot += jo.mdot;
+            }
+          } else {
+            thrust += thrustAtPressure(g.engine, p) * g.count;
+            mdot += massFlow(g.engine) * g.count;
+            maxAmb = Math.min(maxAmb, g.engine.maxAmbientPressure);
+          }
+        }
+        out.push({ thrust, mdot, pool: this.stageIndex, maxAmb, stage: this.stageIndex, spentSolid: false });
+        return out;
+      }
       // Serial fallback (hand-built vehicles): the whole stage drains its
       // own pool at published performance.
-      if (this.engineFailed.has(this.stageIndex)) return out;
       const maxAmb = Math.min(...stage.engines.map((g) => g.engine.maxAmbientPressure), Infinity);
       out.push({
         thrust: stageThrustAtPressure(stage, p),
@@ -624,6 +694,11 @@ export class Sim {
       const e = grp.engine;
       const pool = g.drain.find((d) => (this.pools[d] ?? 0) > 0) ?? -1;
       if (pool < 0) continue;
+      if (e.airBreathing) {
+        const jo = this.jetOutput(e, grp.count, air, g.stage);
+        if (jo) out.push({ thrust: jo.thrust, mdot: jo.mdot, pool, maxAmb: Infinity, stage: g.stage, spentSolid: false });
+        continue;
+      }
       // Nozzle extension: stowed bell wastes Isp at the same mass flow.
       let thrustVacEff = e.thrustVac;
       let maxAmb = e.maxAmbientPressure;
@@ -735,7 +810,7 @@ export class Sim {
    * empties, and enforces the flow-separation limit (sustained firing
    * above an engine's ambient-pressure limit DESTROYS it — side loads —
    * rather than merely underperforming). */
-  private applyBurns(dt: number, p: number): { thrust: number; mdot: number; drained: number } {
+  private applyBurns(dt: number, p: number, air?: { rho: number; mach: number }): { thrust: number; mdot: number; drained: number } {
     let thrust = 0;
     let mdot = 0;
     let drained = 0;
@@ -743,7 +818,7 @@ export class Sim {
       this.sepExposure = Math.max(0, this.sepExposure - dt);
       return { thrust, mdot, drained };
     }
-    const burns = this.groupBurns(p);
+    const burns = this.groupBurns(p, air);
     const separating: number[] = [];
     const hadTrigger = (this.pools[this.stageIndex] ?? 0) > 0;
     for (const b of burns) {
@@ -823,7 +898,12 @@ export class Sim {
     // sharply on valve closure rather than decaying forever, so cut the
     // exponential tail once it falls below 1% of rated thrust.
     if (this.actualThrottle < 0.01 && cmd === 0) this.actualThrottle = 0;
-    const { thrust, drained } = this.applyBurns(dt, p);
+    // Resting on the surface: zero airspeed, pad-altitude density (jets
+    // make static sea-level-class thrust here — correct).
+    const atmS = this.body.atmosphere;
+    const groundAir = atmS ? { rho: atmS.density(Math.max(0, this.altitude)), mach: 0 } : { rho: 0, mach: 0 };
+    const { thrust, drained } = this.applyBurns(dt, p, groundAir);
+    this.thrustNow = thrust;
     this.state.m -= drained;
     this.coastKeeping(dt, this.actualThrottle > 0.05);
     this.state.t += dt;
@@ -855,17 +935,27 @@ export class Sim {
     // exponential tail once it falls below 1% of rated thrust.
     if (this.actualThrottle < 0.01 && cmd === 0) this.actualThrottle = 0;
 
+    // Flow state for air-breathing engines (constant within the step —
+    // like rocket thrust; the per-step Mach/ρ error at dt ≤ 0.05 s is
+    // <0.5%, far below the f(M) table's own fidelity).
+    const airVecNow = this.airspeedVec;
+    const altNow = Math.max(0, this.altitude);
+    const airCtx = atm
+      ? { rho: atm.density(altNow), mach: norm(airVecNow) / speedOfSound(altNow) }
+      : { rho: 0, mach: 0 };
+
     let mdot = 0;
     let thrust = 0;
     if (stage && this.actualThrottle > 0 && this.drainableMass() > 0) {
       // Probe burn rates (no drain yet) for the RK4 inputs and dt clamp.
-      for (const b of this.groupBurns(p)) {
+      for (const b of this.groupBurns(p, airCtx)) {
         if ((this.pools[b.pool] ?? 0) <= 0) continue;
         thrust += b.thrust * this.actualThrottle;
         mdot += b.mdot * this.actualThrottle;
       }
       if (mdot > 0) dt = Math.min(dt, Math.max(this.drainableMass() / mdot, 1e-4));
     }
+    this.thrustNow = thrust;
 
     const props = this.massProps;
     const lever = props.yCoM - this.attachedBottomY();
@@ -1036,7 +1126,7 @@ export class Sim {
     this.checkStructure();
 
     // Pool drains (RK4's dm already took the mass), boiloff, settling.
-    this.applyBurns(dt, p);
+    this.applyBurns(dt, p, airCtx);
     this.coastKeeping(dt, this.actualThrottle > 0.05 && thrust / this.state.m > 0.5);
     this.checkContact();
     this.checkOrbit();

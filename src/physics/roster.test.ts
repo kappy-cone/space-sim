@@ -35,6 +35,33 @@ describe('engine roster', () => {
       expect(e.source.length, tag).toBeGreaterThan(10);
       expect(() => propellantById(e.propellant), tag).not.toThrow();
       expect(e.thrustVac, tag).toBeGreaterThan(0);
+      if (e.airBreathing) {
+        // Jets: fuel-only Isp = 1/(tsfc·g₀), far outside the rocket band
+        // BY CONSTRUCTION (no oxidizer aboard) — that gap is the point.
+        expect(e.propellant, tag).toBe('jetfuel');
+        expect(e.ispVac, tag).toBeGreaterThan(1_000);
+        expect(e.ispVac, tag).toBeLessThan(8_000);
+        expect(Math.abs(e.ispVac - 1 / (e.airBreathing.tsfc * G0)) / e.ispVac, tag).toBeLessThan(0.001);
+        expect(e.ispSL, tag).toBe(e.ispVac); // the (ρ/ρ₀)·f(M) model owns the lapse
+        expect(e.thrustSL, tag).toBe(e.thrustVac);
+        expect(e.ullageImmune, tag).toBe(true);
+        expect(e.gimbalDeg, tag).toBe(0);
+        expect(e.airBreathing.minMach, tag).toBeGreaterThanOrEqual(0);
+        expect(e.airBreathing.maxMach, tag).toBeGreaterThan(e.airBreathing.minMach);
+        expect(e.airBreathing.rhoFloor, tag).toBeGreaterThan(0);
+        expect(e.airBreathing.rhoFloor, tag).toBeLessThan(1.225);
+        // f(M) table: Mach-ordered, sane multipliers, inside the envelope.
+        let lastM = -1;
+        for (const [m, f] of e.airBreathing.machTable) {
+          expect(m, tag).toBeGreaterThan(lastM);
+          lastM = m;
+          expect(f, tag).toBeGreaterThan(0);
+          expect(f, tag).toBeLessThan(1.6);
+        }
+        expect(lastM, tag).toBeCloseTo(e.airBreathing.maxMach, 5);
+        expect(e.mass, tag).toBeGreaterThan(0);
+        continue; // rocket-specific checks below don't apply
+      }
       expect(e.ispVac, tag).toBeGreaterThan(150);
       expect(e.ispVac, tag).toBeLessThan(500);
       expect(e.mass, tag).toBeGreaterThan(0);

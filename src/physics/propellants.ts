@@ -8,7 +8,7 @@
 // NOT a thermal model. It is what closes the roster: hydrolox must lose
 // something on long coasts, or hypergolic has no reason to exist.
 
-export type PropellantId = 'kerolox' | 'hydrolox' | 'methalox' | 'hypergolic' | 'solid';
+export type PropellantId = 'kerolox' | 'hydrolox' | 'methalox' | 'hypergolic' | 'solid' | 'jetfuel';
 
 export interface Propellant {
   id: PropellantId;
@@ -63,6 +63,18 @@ export const PROPELLANTS: readonly Propellant[] = [
     bulkDensity: 1159,
     boiloffPerDay: 0, // storable for years — the reason it exists
     source: 'Sutton & Biblarz 9e (densities, storability)',
+  },
+  {
+    id: 'jetfuel',
+    name: 'Jet A',
+    // Kerosene-type turbine fuel, 775–840 kg/m³ at 15 °C per the ASTM
+    // D1655 specification; 800 is the working midpoint. NO OXIDIZER —
+    // the engine breathes it from the atmosphere, which is the entire
+    // reason the plane class exists (a jet's fuel-only Isp is ~20× a
+    // kerolox rocket's).
+    bulkDensity: 800,
+    boiloffPerDay: 0, // storable at ambient — it's kerosene
+    source: 'ASTM D1655 Jet A density range 775–840 kg/m³; 800 midpoint',
   },
   {
     id: 'solid',

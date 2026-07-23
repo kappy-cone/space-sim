@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { engineById, tankById } from './parts';
 import { Sim } from './sim';
 import { vec } from './vec2';
+import { speedOfSound } from './atmosphere';
 import { Vehicle, stageIgnitionLimit, stageMinThrottle } from './vehicle';
 
 function vacuumShip(engineId: string): Sim {
@@ -78,5 +79,97 @@ describe('ignition budget', () => {
     for (let i = 0; i < 40; i++) sim.step(0.05);
     expect(sim.actualThrottle).toBe(0);
     expect(sim.events.some((e) => e.type === 'ignitionFailed')).toBe(true);
+  });
+});
+
+/** Level flight at `alt` and Mach `mach`, single jet engine, full tanks. */
+function jetShip(engineId: string, alt: number, mach: number): Sim {
+  const vehicle: Vehicle = {
+    stages: [{
+      engines: [{ engine: engineById(engineId), count: 1 }],
+      tanks: [{ id: 'jt', name: 'Jet fuel tank', fluid: 'jetfuel', volume: 2.5, propellantMass: 2_000, dryMass: 88, source: 'synthetic test tank' }],
+      extraDryMass: 8_000,
+    }],
+    payloadMass: 0,
+    cd: 0.01, // minimal drag so the flow state holds through the check window
+    area: 1,
+  };
+  const sim = new Sim(vehicle);
+  const r = sim.body.radius + alt;
+  const speed = mach * speedOfSound(alt);
+  sim.landed = false;
+  sim.state = {
+    r: vec(r, 0),
+    v: vec(0, sim.body.rotationRate * r + speed),
+    theta: Math.PI / 2, // nose along the airflow
+    omega: 0,
+    m: sim.state.m,
+    t: 0,
+  };
+  return sim;
+}
+
+const spool = (sim: Sim, ticks = 60): void => {
+  sim.throttle = 1;
+  for (let i = 0; i < ticks; i++) sim.step(0.05);
+};
+
+describe('air-breathing engines', () => {
+  it('CFM56 hits the published cruise thrust point (M0.8 / FL350)', () => {
+    // Published CFM56-5B cruise thrust ≈ 23–26 kN at M0.8, 35,000 ft.
+    // The f(M) table was tuned ONCE to land this and is now frozen —
+    // this test is the calibration pin.
+    const sim = jetShip('cfm56', 10_668, 0.8);
+    spool(sim);
+    expect(sim.thrustNow).toBeGreaterThan(22_000);
+    expect(sim.thrustNow).toBeLessThan(27_000);
+  });
+
+  it('the fuel-only Isp gap vs a kerolox rocket is ~20× (the headline)', () => {
+    expect(engineById('cfm56').ispVac / engineById('merlin-1d').ispVac).toBeGreaterThan(20);
+  });
+
+  it('flames out above the density floor ceiling, with the limit named', () => {
+    const sim = jetShip('cfm56', 20_000, 0.8); // ρ(20 km) ≈ 0.089 < 0.28 floor
+    spool(sim);
+    expect(sim.thrustNow).toBe(0);
+    const ev = sim.events.find((e) => e.type === 'jetFlameout');
+    expect(ev).toBeDefined();
+    if (ev?.type === 'jetFlameout') expect(ev.reason).toContain('density');
+  });
+
+  it('relights on its own when the envelope returns (windmill)', () => {
+    const sim = jetShip('cfm56', 20_000, 0.8);
+    spool(sim);
+    expect(sim.jetOut.has(0)).toBe(true);
+    // Hand the state back into the envelope.
+    const r = sim.body.radius + 9_000;
+    sim.state = { ...sim.state, r: vec(r, 0), v: vec(0, sim.body.rotationRate * r + 0.7 * speedOfSound(9_000)) };
+    spool(sim, 40);
+    expect(sim.jetOut.has(0)).toBe(false);
+    expect(sim.thrustNow).toBeGreaterThan(0);
+  });
+
+  it('the ramjet needs a boost: dead at M0.9, alive at M2.5', () => {
+    const cold = jetShip('rj43', 5_000, 0.9);
+    spool(cold);
+    expect(cold.thrustNow).toBe(0);
+    const ev = cold.events.find((e) => e.type === 'jetFlameout');
+    if (ev?.type === 'jetFlameout') expect(ev.reason).toContain('light-off');
+    const hot = jetShip('rj43', 15_000, 2.5);
+    spool(hot);
+    expect(hot.thrustNow).toBeGreaterThan(0);
+  });
+
+  it('jets burn fuel at ṁ = tsfc·T — no oxidizer', () => {
+    const sim = jetShip('cfm56', 5_000, 0.6);
+    spool(sim);
+    const m0 = sim.state.m;
+    const t0 = sim.state.t;
+    const thrust0 = sim.thrustNow;
+    for (let i = 0; i < 100; i++) sim.step(0.05);
+    const burned = m0 - sim.state.m;
+    const expected = engineById('cfm56').airBreathing!.tsfc * thrust0 * (sim.state.t - t0);
+    expect(Math.abs(burned - expected) / expected).toBeLessThan(0.05);
   });
 });
