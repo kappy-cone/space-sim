@@ -14,6 +14,7 @@ import { BODIES, bodyById, bodyOrbitState } from '../physics/bodies';
 import { LandingAutopilot } from '../physics/landing';
 import { Sim, TOUCHDOWN_LIMITS } from '../physics/sim';
 import { stageIgnitionLimit, stageMinThrottle, stageThrustAtPressure } from '../physics/vehicle';
+import { engineById } from '../physics/parts';
 import { machDragFactor, speedOfSound } from '../physics/atmosphere';
 import { add, norm, perp, scale, sub, vec } from '../physics/vec2';
 import { P0_SEA_LEVEL } from '../physics/constants';
@@ -42,6 +43,7 @@ interface PartInstance {
   isFin: boolean;
   isLeg: boolean;
   height: number;
+  hScale: number;
   burnIndex: number;
   x: number;
   y: number;
@@ -51,6 +53,8 @@ interface PartInstance {
   // engine plume info
   engine: boolean;
   exitRadius: number;
+  /** Nozzle exit pressure proxy [Pa] for plume expansion visuals. */
+  pExit: number;
 }
 
 export class Flight3D {
@@ -88,7 +92,7 @@ export class Flight3D {
    * are "consumed" implicitly when the sim state already reflects them
    * (autopilot separations, manual P/G deploys), so space always
    * triggers the next action that still makes sense. */
-  private stagingEntries: { kind: 'sep' | 'legs' | 'chutes'; afterStage: number; label: string }[] = [];
+  private stagingEntries: { kind: 'sep' | 'legs' | 'chutes' | 'fairing' | 'nozzle'; afterStage: number; label: string }[] = [];
   private consumedEntries = new Set<number>();
   private stageBtn!: HTMLButtonElement;
 
@@ -122,7 +126,8 @@ export class Flight3D {
           defId: pl.def.id,
           isFin: !!pl.def.fin,
           isLeg: pl.def.kind === 'leg',
-          height: pl.def.height,
+          height: pl.height,
+          hScale: pl.height / pl.def.height,
           burnIndex: burnIndex.get(id) ?? 0,
           x: inst.x,
           y: inst.y,
@@ -131,6 +136,7 @@ export class Flight3D {
           color: pl.def.color,
           engine: pl.def.kind === 'engine',
           exitRadius: pl.def.radiusBottom,
+          pExit: plumeExitPressure(pl.def),
         });
       }
     }
@@ -167,10 +173,24 @@ export class Flight3D {
       ]),
     );
 
-    // Staging sequence: all separations in burn order, then deployables
-    // (terminal-descent devices by default; P/G still fire them anytime).
-    for (let i = 0; i + 1 < compiled.vehicle.stages.length; i++) {
+    // Staging sequence: separations in burn order with deploy states
+    // interleaved (fairing after the first separation, nozzle extensions
+    // when their stage becomes active), then terminal-descent deployables.
+    const vStages = compiled.vehicle.stages;
+    const hasNozzle = (k: number): boolean => !!vStages[k]?.engines.some((g) => g.engine.nozzleExtension);
+    const hasFairings = (compiled.geometry.fairings?.length ?? 0) > 0;
+    if (hasNozzle(0)) this.stagingEntries.push({ kind: 'nozzle', afterStage: 0, label: 'Extend nozzle' });
+    for (let i = 0; i + 1 < vStages.length; i++) {
       this.stagingEntries.push({ kind: 'sep', afterStage: i, label: `Separate stage ${i + 1}` });
+      if (i === 0 && hasFairings) {
+        this.stagingEntries.push({ kind: 'fairing', afterStage: -1, label: 'Jettison fairing' });
+      }
+      if (hasNozzle(i + 1)) {
+        this.stagingEntries.push({ kind: 'nozzle', afterStage: i + 1, label: 'Extend nozzle' });
+      }
+    }
+    if (vStages.length === 1 && hasFairings) {
+      this.stagingEntries.push({ kind: 'fairing', afterStage: -1, label: 'Jettison fairing' });
     }
     if (compiled.geometry.legs.length > 0) {
       this.stagingEntries.push({ kind: 'legs', afterStage: -1, label: 'Deploy landing legs' });
@@ -233,6 +253,8 @@ export class Flight3D {
       ['aoa', 'AoA'],
       ['margin', 'Stability'],
       ['gimbal', 'Gimbal'],
+      ['settle', 'Prop state'],
+      ['rcs', 'RCS/ullage'],
     ];
     for (const [key, label] of rows) {
       const l = document.createElement('div');
@@ -371,7 +393,7 @@ export class Flight3D {
     const hint = document.createElement('div');
     hint.className = 'vab-hint';
     hint.style.bottom = '62px';
-    hint.textContent = 'space: launch/stage · A: autopilot · ← →: pitch · ↑ ↓: throttle · Z/X: full/cut · , .: warp · drag: orbit · wheel: zoom';
+    hint.textContent = 'space: launch/stage · A: autopilot · ← →: pitch · ↑ ↓: throttle · Z/X: full/cut · T: RCS settle · U: ullage motor · N: nozzle · , .: warp';
     this.root.appendChild(hint);
     this.root.appendChild(bar);
   }
@@ -382,6 +404,20 @@ export class Flight3D {
     this.launchBtn.disabled = true;
   }
 
+  /** Stages burning in the current phase (parallel staging: a strap-on
+   * phase includes the sustainer and any further strap-on rings). */
+  private currentPhaseMembers(): number[] {
+    const so = this.sim.vehicle.strapOn;
+    const k = this.sim.stageIndex;
+    if (!so || !so[k]) return [k];
+    const out = [k];
+    for (let j = k + 1; j < this.sim.vehicle.stages.length; j++) {
+      out.push(j);
+      if (!so[j]) break;
+    }
+    return out;
+  }
+
   /** First staging entry the sim state hasn't already satisfied. */
   private nextStagingIndex(): number {
     for (let i = 0; i < this.stagingEntries.length; i++) {
@@ -390,6 +426,8 @@ export class Flight3D {
       if (e.kind === 'sep' && this.sim.stageIndex > e.afterStage) continue;
       if (e.kind === 'legs' && this.sim.legsDeployed) continue;
       if (e.kind === 'chutes' && this.sim.chutesDeployed) continue;
+      if (e.kind === 'fairing' && this.sim.fairingsJettisoned) continue;
+      if (e.kind === 'nozzle' && this.sim.nozzleDeployed.has(e.afterStage)) continue;
       return i;
     }
     return -1;
@@ -402,10 +440,18 @@ export class Flight3D {
       return;
     }
     const e = this.stagingEntries[i]!;
+    if (e.kind === 'nozzle') {
+      // Only consumable when it actually deploys (engine must be shut
+      // down and the stage active) — otherwise leave it queued.
+      this.sim.deployNozzle();
+      if (this.sim.nozzleDeployed.has(e.afterStage)) this.consumedEntries.add(i);
+      return;
+    }
     this.consumedEntries.add(i);
     if (e.kind === 'sep') this.sim.stage();
     else if (e.kind === 'legs') this.sim.deployLegs();
-    else this.sim.deployChutes();
+    else if (e.kind === 'chutes') this.sim.deployChutes();
+    else this.sim.jettisonFairings();
   }
 
   /** Right-drag steering: pitch the commanded attitude in the orbital
@@ -456,6 +502,9 @@ export class Flight3D {
     else if (e.key === 'a') this.toggleAutopilot();
     else if (e.key === 'g') this.sim.deployLegs();
     else if (e.key === 'p') this.sim.deployChutes();
+    else if (e.key === 't') this.sim.rcsSettle = !this.sim.rcsSettle;
+    else if (e.key === 'u') this.sim.fireUllageMotor();
+    else if (e.key === 'n') this.sim.deployNozzle();
     else if (!this.autopilotOn) {
       if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault();
@@ -592,6 +641,21 @@ export class Flight3D {
         case 'crash':
           text = `Impact at ${fmtSpeed(ev.speed)}`;
           break;
+        case 'flameout':
+          text = `⚠ Flameout — propellant unsettled (ignition spent). Settle with RCS (T) or an ullage motor (U), then relight`;
+          break;
+        case 'engineDestroyed':
+          text = `✗ Stage ${ev.stage + 1} engines destroyed — ${ev.reason}`;
+          break;
+        case 'fairingJettisoned':
+          text = 'Fairing jettisoned';
+          break;
+        case 'nozzleDeployed':
+          text = `Nozzle extension deployed (stage ${ev.stage + 1})`;
+          break;
+        case 'ullageMotorFired':
+          text = `Ullage motor fired — ${ev.remaining} left`;
+          break;
         case 'ignitionFailed':
           text = `⚠ Stage ${ev.stage + 1}: no ignitions left (${ev.limit} used, limit ${ev.limit})`;
           break;
@@ -663,13 +727,29 @@ export class Flight3D {
     // and the local ground cap instead of letting them z-fight (the
     // "flashing ground at launch" bug).
     const planetMesh = s.body.id === 'moon' ? 'planet-moon' : 'planet-earth';
-    this.renderer.draw(planetMesh, multiply(spin, scaling(s.body.radius)), [1, 1, 1], 1, false, false, true);
+    // While the local ground cap is active, cut the global sphere's
+    // near-field out entirely in the shader (uHole): its planet-center
+    // model origin jitters in float32 up close, and no polygon offset can
+    // fully mask two surfaces a jitter apart — remove the competition.
+    const capActive = s.altitude < 30_000;
+    const upA0 = Math.atan2(s.state.r.y, s.state.r.x);
+    const capW0 = this.toWorld(s.body.radius * Math.cos(upA0), s.body.radius * Math.sin(upA0));
+    this.renderer.draw(
+      planetMesh,
+      multiply(spin, scaling(s.body.radius)),
+      [1, 1, 1],
+      1,
+      false,
+      false,
+      true,
+      capActive ? { x: capW0.x, y: capW0.y, z: capW0.z, r: 55_000 } : undefined,
+    );
     // Local terrain cap anchored at the sub-vehicle surface point: its
     // camera-relative translation is small, so the ground the player
     // actually looks at is depth-stable.
-    if (s.altitude < 30_000) {
-      const upA = Math.atan2(s.state.r.y, s.state.r.x);
-      const capW = this.toWorld(s.body.radius * Math.cos(upA), s.body.radius * Math.sin(upA));
+    if (capActive) {
+      const upA = upA0;
+      const capW = capW0;
       // Tint from the body's paint at the sub-vehicle point (sim plane =
       // equator, lat 0; the launch site sits at longitude 90°).
       const lon = Math.PI / 2 - upA + s.body.rotationRate * s.state.t;
@@ -794,6 +874,7 @@ export class Flight3D {
     for (const inst of this.instances) {
       if (inst.burnIndex < s.stageIndex || s.torn.has(inst.partId)) continue;
       let local = multiply(translation(inst.x, inst.y - yCoM, inst.z), rotationY(-inst.angle));
+      if (inst.hScale !== 1) local = multiply(local, scalingXYZ(1, inst.hScale, 1));
       // Deployed legs splay outward, pivoting at the strut top.
       if (inst.isLeg && s.legsDeployed) {
         const pivot = multiply(
@@ -804,15 +885,39 @@ export class Flight3D {
       }
       this.renderer.draw(inst.defId, multiply(att, local), inst.color);
 
-      // Plume: widens as ambient pressure drops, flickers with combustion.
-      if (inst.engine && inst.burnIndex === s.stageIndex && s.actualThrottle > 0.02 && !s.crashed) {
-        const widen = 1 + 1.6 * (1 - pRatio);
-        const len = inst.exitRadius * 9 * s.actualThrottle * (0.92 + Math.random() * 0.16);
+      // Plume: expansion tracks the nozzle/ambient pressure match —
+      // over- and under-expansion visibly change the exhaust, and a
+      // mismatched nozzle shows a shock-diamond train. The plume telling
+      // you the engine is wrong for this altitude IS the instrumentation.
+      const phaseMembers = this.currentPhaseMembers();
+      if (
+        inst.engine &&
+        phaseMembers.includes(inst.burnIndex) &&
+        !s.engineFailed.has(inst.burnIndex) &&
+        s.actualThrottle > 0.02 &&
+        !s.crashed
+      ) {
+        const pAmb = pRatio * P0_SEA_LEVEL;
+        const match = inst.pExit / Math.max(pAmb, 8); // >1 = underexpanded
+        const widen = Math.min(3.2, Math.max(0.7, Math.sqrt(match)));
+        const len =
+          inst.exitRadius * 9 * s.actualThrottle * (0.92 + Math.random() * 0.16) *
+          Math.min(1.8, Math.max(0.8, Math.cbrt(match)));
         const plumeLocal = multiply(
           translation(inst.x, inst.y - yCoM, inst.z),
           scalingXYZ(inst.exitRadius * widen, len, inst.exitRadius * widen),
         );
         this.renderer.draw('plume', multiply(att, plumeLocal), [1.0, 0.72, 0.35], 0.65, true);
+        if (pAmb > 300 && (match < 0.55 || match > 2.5)) {
+          const spacing = inst.exitRadius * (1.1 + Math.min(2.5, Math.abs(Math.log(match))));
+          for (let k = 1; k <= 3; k++) {
+            const dLocal = multiply(
+              translation(inst.x, inst.y - yCoM - k * spacing, inst.z),
+              scaling(inst.exitRadius * 0.34),
+            );
+            this.renderer.draw('canopy', multiply(att, dLocal), [1.0, 0.92, 0.75], 0.8, true);
+          }
+        }
       }
     }
 
@@ -983,6 +1088,19 @@ export class Flight3D {
       s.q > 1_000 ? (margin >= 0.2 ? 'good' : margin >= 0 ? 'warn' : 'bad') : '',
     );
     this.set('gimbal', `${((s.gimbal * 180) / Math.PI).toFixed(1)}°`);
+    // Ullage state: pump-fed relights need settled propellant.
+    const settleTxt = s.settled
+      ? s.rcsSettle && !s.landed
+        ? 'settled (RCS holding)'
+        : 'settled'
+      : s.rcsSettle
+        ? 'settling…'
+        : 'UNSETTLED';
+    this.set('settle', settleTxt, s.settled ? 'good' : 'warn');
+    this.set(
+      'rcs',
+      `${isFinite(s.rcsPropellant) ? s.rcsPropellant.toFixed(0) + ' kg' : '—'}${s.ullageMotorsLeft > 0 ? ` · ${s.ullageMotorsLeft} motor${s.ullageMotorsLeft > 1 ? 's' : ''} (U)` : ''}`,
+    );
 
     // Stage button shows the next sequence action, KSP-style.
     const nextIdx = this.nextStagingIndex();
@@ -1064,4 +1182,15 @@ export class Flight3D {
     this.banner.className = `banner ${cls}`;
     this.banner.style.display = 'block';
   }
+}
+
+
+/** Nozzle exit-pressure proxy for plume visuals: vacuum bells sit near
+ * their separation limit × 0.4 (the Summerfield relation inverted);
+ * sea-level bells run mildly overexpanded at the pad (~0.6 atm). */
+function plumeExitPressure(def: { engineId?: string; solidMotor?: string }): number {
+  const id = def.engineId ?? def.solidMotor;
+  if (!id) return P0_SEA_LEVEL * 0.6;
+  const e = engineById(id);
+  return isFinite(e.maxAmbientPressure) ? e.maxAmbientPressure * 0.4 : P0_SEA_LEVEL * 0.6;
 }

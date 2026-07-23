@@ -35,8 +35,18 @@ in vec3 vColor;
 uniform vec3 uColorU;
 uniform float uAlpha;
 uniform float uUnlit;
+// Discard hole: fragments within sqrt(uHoleR2) of uHoleCenter (eye-rel)
+// are cut out — used to remove the planet sphere's near-field where a
+// locally-anchored ground cap replaces it (the sphere's planet-center
+// model origin makes its near fragments jitter in float32 and z-fight).
+uniform vec3 uHoleCenter;
+uniform float uHoleR2;
 out vec4 frag;
 void main() {
+  if (uHoleR2 > 0.0) {
+    vec3 hd = vRel - uHoleCenter;
+    if (dot(hd, hd) < uHoleR2) discard;
+  }
   vec3 uColor = uColorU * vColor;
   if (uUnlit > 0.5) { frag = vec4(uColor, uAlpha); return; }
   vec3 n = normalize(vNormal);
@@ -93,7 +103,7 @@ export class Renderer {
     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
       throw new Error(gl.getProgramInfoLog(prog) ?? 'link failed');
     }
-    for (const name of ['uMVP', 'uModelRel', 'uColorU', 'uAlpha', 'uUnlit']) {
+    for (const name of ['uMVP', 'uModelRel', 'uColorU', 'uAlpha', 'uUnlit', 'uHoleCenter', 'uHoleR2']) {
       this.uni[name] = gl.getUniformLocation(prog, name)!;
     }
     return prog;
@@ -186,10 +196,18 @@ export class Renderer {
     unlit = false,
     onTop = false,
     depthPush = false,
+    hole?: { x: number; y: number; z: number; r: number },
   ): void {
     const gl = this.gl;
     const m = this.meshes.get(key);
     if (!m) return;
+    if (hole) {
+      // Eye-relative in float64 before the GPU sees it.
+      gl.uniform3f(this.uni.uHoleCenter!, hole.x - this.eye.x, hole.y - this.eye.y, hole.z - this.eye.z);
+      gl.uniform1f(this.uni.uHoleR2!, hole.r * hole.r);
+    } else {
+      gl.uniform1f(this.uni.uHoleR2!, 0);
+    }
     // depthPush shoves this draw slightly deeper in the depth buffer —
     // used for the global planet sphere so near-coplanar local geometry
     // (pad deck, local ground cap) always wins instead of z-fighting.

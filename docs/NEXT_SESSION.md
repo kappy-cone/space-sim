@@ -126,6 +126,28 @@ landing.test.ts — see that commit). Mission-driving learnings:
   cluster instance (instanceCount semantics) — 2× engines on the lander
   silently doubled everything below it in the VAB. Consider a warning.
 
+## Parts expansion (this session)
+
+The roster expansion landed: propellant types with real densities +
+per-fluid boiloff, volumetric parametric tanks (35 kg/m³ structure),
+solids with grain thrust curves, ullage/flameout with RCS-settle and
+ullage motors, flow-separation destruction, extendable nozzles, radial
+pylons with parallel staging and crossfeed (pools per stage), cluster
+mount mass, per-stage drag with fairing enclosure, control-authority
+parts (RCS quads, CMG, grid fin), plume expansion + shock diamonds, and
+the shader-hole fix for near-field planet z-fighting. The non-domination
+table is docs/PARTS.md; the schema validator is roster.test.ts. Starters
+now span the roster (Heavy Lifter = RD-180 + GEM-40s + Centaur; Crew
+Ferry = hypergolic OMS insertion; Moon Freighter = hydrolox + ullage
+motors + fairing; Moon Hopper = pressure-fed lander).
+
+Loose ends worth picking up next: builder Δv for crossfeed/parallel
+phases is still the serial per-stage estimate (honest but approximate);
+drain-order arrows in the builder are text-only ("strap-on · crossfeeds
+the core"); legs/chutes still use their pre-existing deploy systems
+rather than the generic deploy mechanism; RCS torque drain only applies
+to vehicles with a budget (legacy pods free); no methalox tank at 1.2 m.
+
 ## Known rough edges
 
 - **Staging reorder UI** allows physically silly orders (by design — the

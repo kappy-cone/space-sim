@@ -5,6 +5,7 @@
 
 import { PARTS, PartDef, partById } from '../craft/catalog';
 import { engineById } from '../physics/parts';
+import { propellantById } from '../physics/propellants';
 import { massFlow } from '../physics/vehicle';
 import { Compiled, LEO_BUDGET, compile } from '../craft/compile';
 import {
@@ -22,9 +23,10 @@ import {
   serialize,
   starterCrafts,
   subtreeIds,
+  partHeight,
 } from '../craft/craft';
 import { OrbitCamera } from '../gl/camera';
-import { multiply, rotationY, scaling, translation, v3 } from '../gl/mat4';
+import { multiply, rotationY, scaling, scalingXYZ, translation, v3 } from '../gl/mat4';
 import { finMesh, gridMesh, segmentsMesh } from '../gl/mesh';
 import { rayFrustums } from '../gl/ray';
 import { Renderer } from '../gl/renderer';
@@ -152,20 +154,23 @@ export class Vab {
     this.paletteEl.className = 'vab-palette panel';
     const kinds: [string[], string][] = [
       [['payload'], 'Payload'],
-      [['tank'], 'Tanks'],
-      [['engine'], 'Engines'],
-      [['decoupler'], 'Staging'],
-      [['nose', 'fin'], 'Aero'],
+      [['tank'], 'Tanks (length adjustable)'],
+      [['engine'], 'Engines & Boosters'],
+      [['decoupler'], 'Staging & Pylons'],
+      [['adapter'], 'Adapters'],
+      [['nose', 'fin'], 'Aero & Fairings'],
+      [['control'], 'Control'],
+      [['leg', 'chute'], 'Landing & Recovery'],
     ];
     for (const [group, title] of kinds) {
       const h = document.createElement('h3');
       h.textContent = title;
       this.paletteEl.appendChild(h);
-      for (const def of PARTS.filter((p) => group.includes(p.kind))) {
+      for (const def of PARTS.filter((p) => group.includes(p.kind) && !p.hidden)) {
         const b = document.createElement('button');
         b.className = 'part-btn';
         b.textContent = def.name;
-        b.title = `${fmtMass(def.dryMass + (def.propellant ?? 0))}${def.propellant ? ` (${fmtMass(def.propellant)} propellant)` : ''}`;
+        b.title = partStats(def);
         b.onclick = () => {
           this.holding = def;
           this.selectedId = null;
@@ -330,12 +335,17 @@ export class Vab {
       rows.push(['Mass flow', `${(massFlow(e) * n).toFixed(1)} kg/s${n > 1 ? ' total' : ''}`]);
       rows.push(['Mass', `${fmtMass(e.mass * n)}${n > 1 ? ' total' : ''}`]);
       if (e.vacuumOnly) rows.push(['Note', 'vacuum-only nozzle']);
-    } else if (def.kind === 'tank') {
-      rows.push(['Propellant', fmtMass((def.propellant ?? 0) * n)]);
-      rows.push(['Dry mass', fmtMass(def.dryMass * n)]);
-      rows.push(['Full mass', fmtMass(((def.propellant ?? 0) + def.dryMass) * n)]);
+    } else if (def.kind === 'tank' && def.fluid) {
+      const len = partHeight(p, def);
+      const vol = Math.PI * def.maxRadius * def.maxRadius * len;
+      const fluid = propellantById(def.fluid);
+      const prop = vol * 0.95 * fluid.bulkDensity;
+      rows.push(['Fluid', `${fluid.name} (${fluid.bulkDensity} kg/m³)`]);
+      rows.push(['Propellant', fmtMass(prop * n)]);
+      rows.push(['Dry mass', fmtMass(vol * 35 * n)]);
+      if (fluid.boiloffPerDay > 0) rows.push(['Boiloff', `${(fluid.boiloffPerDay * 100).toFixed(1)} %/day`]);
       rows.push(['Diameter', `${(def.maxRadius * 2).toFixed(1)} m`]);
-      rows.push(['Length', `${def.height.toFixed(1)} m`]);
+      rows.push(['Length', `${len.toFixed(1)} m`]);
     } else if (def.fin) {
       rows.push(['Root/tip chord', `${def.fin.cr} / ${def.fin.ct} m`]);
       rows.push(['Span', `${def.fin.span} m`]);
@@ -356,6 +366,35 @@ export class Vab {
       `<h3>${def.name}</h3><div class="readouts">` +
       rows.map(([l, v]) => `<div class="label">${l}</div><div class="value">${v}</div>`).join('') +
       '</div>';
+    // Parametric tank length: a live slider — length is a build
+    // parameter, not a part variant.
+    if (def.lengthRange) {
+      const wrap = document.createElement('div');
+      wrap.style.marginTop = '6px';
+      const label = document.createElement('div');
+      label.className = 'label';
+      label.textContent = 'Tank length';
+      const slider = document.createElement('input');
+      slider.type = 'range';
+      slider.min = String(def.lengthRange.min);
+      slider.max = String(def.lengthRange.max);
+      slider.step = '0.5';
+      slider.value = String(partHeight(p, def));
+      let undoPushed = false;
+      slider.oninput = () => {
+        if (!undoPushed) {
+          this.pushUndo();
+          undoPushed = true;
+        }
+        p.length = Number(slider.value);
+        this.compiled = compile(this.craft);
+        this.renderStats();
+        this.renderStaging();
+      };
+      slider.onchange = () => this.recompile();
+      wrap.append(label, slider);
+      this.inspectorEl.appendChild(wrap);
+    }
   }
 
   private updateHint(): void {
@@ -386,6 +425,7 @@ export class Vab {
         return `<tr>
           <td>S${i + 1}</td>
           <td class="num">${noEngines ? '—' : fmtDeltaV(r.deltaV)}</td>
+          <td class="num">${noEngines || r.deltaVSeaLevel <= 0 ? '—' : fmtDeltaV(r.deltaVSeaLevel)}</td>
           <td class="num">${noEngines ? '—' : r.twrIgnition.toFixed(2)}</td>
           <td class="num">${noEngines ? '—' : r.twrBurnout.toFixed(2)}</td>
           <td class="num">${noEngines || !isFinite(r.burnTime) ? '—' : fmtTime(r.burnTime)}</td>
@@ -411,7 +451,7 @@ export class Vab {
     this.statsEl.innerHTML = `
       <h3>Vehicle</h3>
       <table class="stage-table">
-        <tr><th></th><th>Δv (vac)</th><th>TWR ign</th><th>TWR burn</th><th>Burn</th><th>Mass</th></tr>
+        <tr><th></th><th>Δv vac</th><th>Δv SL</th><th>TWR ign</th><th>TWR burn</th><th>Burn</th><th>Mass</th></tr>
         ${rows}
       </table>
       <div class="total-dv">Total Δv: <b>${fmtDeltaV(c.totalDeltaV)}</b></div>
@@ -440,7 +480,7 @@ export class Vab {
           .join('');
         return `<div class="stage-row" data-i="${i}">
           <div class="stage-row-head">
-            <b>Stage ${i + 1}</b>
+            <b>Stage ${i + 1}${cs.strapOn ? (cs.crossfeed ? ' ⇉ strap-on · crossfeeds the core' : ' ⇉ strap-on, parallel burn') : ''}</b>
             <span>
               <button class="mini" data-move="up" data-i="${i}" ${i === 0 ? 'disabled' : ''}>▲</button>
               <button class="mini" data-move="down" data-i="${i}" ${i === c.stages.length - 1 ? 'disabled' : ''}>▼</button>
@@ -916,8 +956,11 @@ export class Vab {
       this.hoverStage !== null ? new Set(this.compiled.stages[this.hoverStage]?.partIds) : null;
 
     for (const [id, pl] of place) {
+      // Parametric tanks: scale the mesh Y to the build-time length.
+      const hScale = pl.height / pl.def.height;
       for (const inst of pl.instances) {
-        const model = multiply(translation(inst.x, inst.y, inst.z), rotationY(-inst.angle));
+        let model = multiply(translation(inst.x, inst.y, inst.z), rotationY(-inst.angle));
+        if (hScale !== 1) model = multiply(model, scalingXYZ(1, hScale, 1));
         let color = pl.def.color;
         if (id === this.selectedId) color = [1.0, 0.8, 0.35];
         else if (id === this.hoverId && !this.holding) color = [color[0] * 1.25, color[1] * 1.25, color[2] * 1.25];
@@ -1002,4 +1045,50 @@ export class Vab {
 
     this.raf = requestAnimationFrame(this.frame);
   };
+}
+
+
+/** Parts-bin tooltip: the numbers that make each tradeoff visible —
+ * why you'd pick one part over another, without opening the source. */
+function partStats(def: PartDef): string {
+  const lines: string[] = [];
+  const eid = def.engineId ?? def.solidMotor;
+  if (eid) {
+    const e = engineById(eid);
+    if (e.propellant !== 'solid') {
+      lines.push(`${e.propellant} · ρ ${propellantById(e.propellant).bulkDensity} kg/m³`);
+    } else {
+      lines.push('solid — no throttle, no shutdown, no restart');
+    }
+    lines.push(
+      `thrust ${e.thrustSL > 0 ? (e.thrustSL / 1000).toFixed(0) + ' kN SL / ' : ''}${(e.thrustVac / 1000).toFixed(0)} kN vac`,
+    );
+    lines.push(`Isp ${e.ispSL > 0 ? e.ispSL + ' s SL / ' : ''}${e.ispVac} s vac`);
+    lines.push(`ε ${e.expansionRatio}:1 · gimbal ±${e.gimbalDeg}° · ${fmtMass(def.dryMass)}`);
+    lines.push(
+      `throttle ${e.throttleable ? Math.round(e.minThrottle * 100) + '–100%' : 'fixed'} · ignitions ${isFinite(e.ignitions) ? e.ignitions : '∞'}${e.ullageImmune ? ' · lights unsettled' : ''}`,
+    );
+    if (isFinite(e.maxAmbientPressure)) {
+      lines.push(`⚠ separates above ${(e.maxAmbientPressure / 1000).toFixed(1)} kPa ambient`);
+    }
+    if (e.nozzleExtension) lines.push(`extendable nozzle ${e.nozzleExtension.stowedExpansionRatio}:1 → ${e.expansionRatio}:1`);
+    if (def.propellant) lines.push(`grain ${fmtMass(def.propellant)}`);
+  } else if (def.fluid) {
+    const f = propellantById(def.fluid);
+    lines.push(`${f.name} · ρ ${f.bulkDensity} kg/m³`);
+    lines.push(`boiloff ${f.boiloffPerDay > 0 ? (f.boiloffPerDay * 100).toFixed(1) + ' %/day' : 'none (storable)'}`);
+    lines.push('length adjustable after placing · structure 35 kg/m³ of volume');
+  } else {
+    lines.push(fmtMass(def.dryMass));
+    if (def.control?.rcsThrust) lines.push(`RCS ${def.control.rcsThrust} N, ${def.control.rcsPropellant} kg budget — settles tanks anywhere`);
+    if (def.control?.wheelTorque) lines.push(`CMG ${def.control.wheelTorque} N·m, free but saturates at ${def.control.wheelCapacity} N·m·s`);
+    if (def.control?.finControl) lines.push('active control surface — authority scales with q');
+    if (def.ullage) lines.push('fire to settle propellant for a pump-fed relight');
+    if (def.crossfeed) lines.push('crossfeed: core engines drain the strap-on first (asparagus)');
+    else if (def.kind === 'decoupler' && def.radialChild) lines.push('strap-on mount: hangs a parallel-burning booster stack');
+    if (def.fairing) lines.push('encloses the payload from the airstream; jettison via staging');
+    if (def.noseCd !== undefined) lines.push(`nose drag class Cd ${def.noseCd}`);
+  }
+  lines.push('— ' + def.source);
+  return lines.join('\n');
 }

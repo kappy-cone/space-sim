@@ -568,8 +568,8 @@ export class Sim {
    * its crossfeed priority list), the flow-separation limit (stowed
    * nozzles separate earlier), and solid thrust-curve multipliers.
    */
-  private groupBurns(p: number): { thrust: number; mdot: number; pool: number; maxAmb: number; stage: number }[] {
-    const out: { thrust: number; mdot: number; pool: number; maxAmb: number; stage: number }[] = [];
+  private groupBurns(p: number): { thrust: number; mdot: number; pool: number; maxAmb: number; stage: number; spentSolid: boolean }[] {
+    const out: { thrust: number; mdot: number; pool: number; maxAmb: number; stage: number; spentSolid: boolean }[] = [];
     const stage = this.vehicle.stages[this.stageIndex];
     if (!stage) return out;
     const phase = this.vehicle.phases?.[this.stageIndex];
@@ -584,6 +584,7 @@ export class Sim {
         pool: this.stageIndex,
         maxAmb,
         stage: this.stageIndex,
+        spentSolid: false,
       });
       return out;
     }
@@ -611,6 +612,11 @@ export class Sim {
         pool,
         maxAmb,
         stage: g.stage,
+        // The published curves tail to zero thrust at burnout; below 2%
+        // the residual sliver of grain is spent (slag, not propellant) —
+        // otherwise mdot → 0 makes the pool asymptote and the phase
+        // never ends (caught live on the Heavy Lifter's GEM-40s).
+        spentSolid: !!e.thrustCurve && curve <= 0.02,
       });
     }
     return out;
@@ -713,7 +719,7 @@ export class Sim {
     for (const b of burns) {
       const avail = this.pools[b.pool] ?? 0;
       if (avail <= 0) continue;
-      const take = Math.min(avail, b.mdot * this.actualThrottle * dt);
+      const take = b.spentSolid ? avail : Math.min(avail, b.mdot * this.actualThrottle * dt);
       this.pools[b.pool] = avail - take;
       drained += take;
       thrust += b.thrust * this.actualThrottle;
