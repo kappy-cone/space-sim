@@ -9,5 +9,9 @@ export default defineConfig({
     // Agent worktrees live under .claude/ — testing them from the parent
     // checkout double-runs every suite and sweeps in scratch files.
     exclude: ['**/node_modules/**', '.claude/**'],
+    // The trajectory tests take seconds of CPU; parallel agent sessions
+    // can load the machine 10×. Headroom over the 5 s default so load
+    // never reads as failure.
+    testTimeout: 60_000,
   },
 });

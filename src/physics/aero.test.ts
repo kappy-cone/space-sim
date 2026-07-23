@@ -68,13 +68,16 @@ describe('finite-wing formulas (textbook pins)', () => {
     const a = liftSlope(ar, e);
     const aStall = stallAngle(clMax, a);
     expect(aStall).toBeCloseTo(1.4 / 4.787, 3);
-    // Continuity: no jump larger than the local slope allows.
+    // Continuity: track the largest step-to-step jump, assert once
+    // (8,000 inline expects made this test a timeout risk under load).
     let prev = surfaceCoefficients(0, a, ar, e, clMax, 0.008).cl;
+    let maxJump = 0;
     for (let alpha = 1e-4; alpha < 0.8; alpha += 1e-4) {
       const { cl } = surfaceCoefficients(alpha, a, ar, e, clMax, 0.008);
-      expect(Math.abs(cl - prev)).toBeLessThan(0.005);
+      maxJump = Math.max(maxJump, Math.abs(cl - prev));
       prev = cl;
     }
+    expect(maxJump).toBeLessThan(0.005);
     // Past the blend: flat-plate values, less lift than Cl_max.
     const post = surfaceCoefficients(aStall + STALL_BLEND + 0.05, a, ar, e, clMax, 0.008);
     expect(post.cl).toBeLessThan(clMax);
