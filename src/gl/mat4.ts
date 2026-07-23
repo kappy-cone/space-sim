@@ -49,6 +49,18 @@ export function rotationY(a: number): Mat4 {
   return m;
 }
 
+/** Rotation about the X axis. */
+export function rotationX(a: number): Mat4 {
+  const m = identity();
+  const c = Math.cos(a);
+  const s = Math.sin(a);
+  m[5] = c;
+  m[6] = s;
+  m[9] = -s;
+  m[10] = c;
+  return m;
+}
+
 /** Rotation about the Z axis. */
 export function rotationZ(a: number): Mat4 {
   const m = identity();

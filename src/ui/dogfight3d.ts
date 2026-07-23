@@ -7,12 +7,12 @@
 // relation tan φ = ωV/g; missiles fly their proportional-navigation
 // paths and leave trails. Low-poly procedural meshes only — no assets.
 
-import { Dogfight, Fighter, Missile } from '../combat/dogfight';
+import { COMBAT_ALT, Dogfight, Fighter, Missile } from '../combat/dogfight';
 import { EARTH } from '../physics/bodies';
 import { SITES, Site } from '../physics/sites';
 import { WorldState } from '../world/world';
 import { OrbitCamera } from '../gl/camera';
-import { Mat4, identity, multiply, rotationY, rotationZ, scaling, scalingXYZ, translation, v3, V3 } from '../gl/mat4';
+import { Mat4, identity, multiply, rotationX, rotationY, rotationZ, scaling, scalingXYZ, translation, v3, V3 } from '../gl/mat4';
 import { MeshData, sphereMesh, terrainColor } from '../gl/mesh';
 import { loadGlbMesh } from '../gl/glb';
 import { Renderer } from '../gl/renderer';
@@ -21,7 +21,7 @@ import { fmtTime } from './format';
 /** Visual altitude of the fight above the surface [m]. The whole
  * engagement is staged over the far-side Meridian base — the same world
  * the flights use — so the ground below is the real Earth, not a grid. */
-const ARENA_ALT = 4_000;
+const ARENA_ALT = COMBAT_ALT;
 const R_EARTH = EARTH.radius;
 /** Local downrange offset [m] of a far-side site from the base meridian
  * (angle π), used to place its runway in the arena's tangent frame. */
@@ -155,7 +155,7 @@ export class Dogfight3D {
 
   constructor(private root: HTMLElement, private onExit: () => void, private worldState?: WorldState, seed = 1) {
     this.seed = seed;
-    this.df = new Dogfight({ seed });
+    this.df = new Dogfight({ seed, baseX: this.runwayB ? Math.abs(siteLocalX(this.runwayB)) : undefined });
     root.innerHTML = '';
     root.className = 'flight';
     this.canvas = document.createElement('canvas');
@@ -203,9 +203,10 @@ export class Dogfight3D {
 
   // ---------- world mapping ----------
 
-  /** sim (x, y) → world (x, ALT, y). */
-  private world(x: number, y: number): V3 {
-    return v3(x, ARENA_ALT, y);
+  /** sim (x, y) at altitude `alt` → world (x, alt, y). Fighters pass their
+   * live climb altitude (0 on the runway); missiles fly at COMBAT_ALT. */
+  private world(x: number, y: number, alt = ARENA_ALT): V3 {
+    return v3(x, alt, y);
   }
 
   private centroid(): V3 {
@@ -284,7 +285,7 @@ export class Dogfight3D {
 
   private restart(seed: number): void {
     this.seed = seed;
-    this.df = new Dogfight({ seed });
+    this.df = new Dogfight({ seed, baseX: this.runwayB ? Math.abs(siteLocalX(this.runwayB)) : undefined });
     this.banks.clear();
     this.headings.clear();
     this.trails.clear();
@@ -335,10 +336,11 @@ export class Dogfight3D {
     }
     for (const f of this.df.fighters) {
       if (!f.alive) continue;
+      if (f.alt < 60) continue; // no contrail on the runway roll
       const key = `f${f.id}`;
       let tr = this.trails.get(key);
       if (!tr) { tr = { pts: [], color: TEAM_COLOR[f.team] }; this.trails.set(key, tr); }
-      const w = this.world(f.pos.x, f.pos.y);
+      const w = this.world(f.pos.x, f.pos.y, f.alt);
       tr.pts.push(w.x, w.y, w.z);
       if (tr.pts.length > 150) tr.pts.splice(0, 3);
     }
@@ -412,8 +414,15 @@ export class Dogfight3D {
     const bank = (this.banks.get(f.id) ?? 0) * 0.8 + Math.max(-1.1, Math.min(1.1, bankTarget)) * 0.2;
     this.banks.set(f.id, bank);
 
-    const wpos = this.world(f.pos.x, f.pos.y);
-    const orient = multiply(translation(wpos.x, wpos.y, wpos.z), multiply(rotationY(heading), rotationZ(bank)));
+    // Sit on the strip (+40 m clearance) on the ground, climb with alt.
+    const wpos = this.world(f.pos.x, f.pos.y, f.alt + 40);
+    // Pitch the nose up on climb-out (visual only; the model is co-alt in
+    // combat). Climb angle ≈ atan(climb-rate / speed), eased down as it levels.
+    const pitch = f.phase === 'climb' ? 0.35 : 0;
+    const orient = multiply(
+      translation(wpos.x, wpos.y, wpos.z),
+      multiply(rotationY(heading), multiply(rotationZ(bank), rotationX(-pitch))),
+    );
     if (this.jetModel) {
       // world = T·Ry·Rz · size · ORIENT · fixup(model→unit).
       const model = multiply(multiply(orient, scaling(JET_SCALE)), multiply(this.jetOrient, this.jetFixup));

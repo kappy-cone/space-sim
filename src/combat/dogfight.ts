@@ -78,6 +78,12 @@ export interface Fighter {
   alive: boolean;
   missiles: number;
   cooldown: number;
+  /** Altitude [m] — 0 on the runway, ramps to COMBAT_ALT on climb-out.
+   * The combat itself is co-altitude (all fighting happens at
+   * COMBAT_ALT); altitude only drives the takeoff sequence + rendering. */
+  alt: number;
+  /** Flight phase: ground roll → climb-out → engaged. */
+  phase: 'roll' | 'climb' | 'combat';
   /** This pilot's launch range [m] — seeded within the envelope so a
    * flight doesn't volley in perfect unison (trigger discipline varies). */
   launchRange: number;
@@ -123,7 +129,19 @@ export interface DogfightOptions {
   names?: { A: string[]; B: string[] };
   dt?: number;
   maxTime?: number;
+  /** Downrange distance of each team's runway from the arena centre [m] —
+   * the view passes its far-side runway offset so the fighters take off
+   * from exactly where the strips are drawn. */
+  baseX?: number;
 }
+
+/** Co-altitude of the engagement [m] — takeoff climbs to it, the fight
+ * happens at it (shared by the model and the 3-D view). */
+export const COMBAT_ALT = 4_000;
+const ROLL_START = 30; // m/s brakes-off speed
+const ROLL_ACCEL = 12; // m/s² ground-roll acceleration (fighter class — ESTIMATE)
+const ROTATE_SPEED = 80; // m/s rotation speed Vr (ESTIMATE)
+const CLIMB_RATE = 250; // m/s vertical — F-16-class initial climb rate (ESTIMATE)
 
 /**
  * A steppable 3-v-3 (or N-v-N) engagement. Team A spawns west heading
@@ -157,24 +175,55 @@ export class Dogfight {
     const nA = opts.names?.A ?? ['Alpha 1', 'Alpha 2', 'Alpha 3'];
     const nB = opts.names?.B ?? ['Bravo 1', 'Bravo 2', 'Bravo 3'];
     const n = Math.min(nA.length, nB.length);
-    const spread = 4_000; // m of lateral separation between wingmen
-    // Start near the merge (~18 km apart) so it's a turning fight, not a
-    // 60 km cruise-in. Offsets are drawn INDEPENDENTLY per side (not
-    // mirrored) so the geometry — and outcome — is genuinely asymmetric.
+    const spread = 1_400; // m of lateral separation between wingmen on the strip
+    const baseX = opts.baseX ?? 11_000; // ≈ the Meridian runway offset
+    // The teams START ON THEIR RUNWAYS at ±baseX and take off toward the
+    // centre — a ground roll, rotation, and climb before the merge. Lateral
+    // offsets are drawn INDEPENDENTLY per side (not mirrored) so the
+    // geometry — and the outcome — is genuinely asymmetric.
     const lr = (): number => LAUNCH_RANGE * (0.45 + 0.5 * rnd());
     for (let i = 0; i < n; i++) {
       const base = (i - (n - 1) / 2) * spread;
       this.fighters.push({
         id: `A${i}`, team: 'A', name: nA[i]!,
-        pos: vec(-9_000, base + (rnd() - 0.5) * 4_000),
-        vel: vec(FIGHTER_SPEED, 0), alive: true, missiles: this.loadout, cooldown: 0, launchRange: lr(),
+        pos: vec(-baseX, base + (rnd() - 0.5) * 800),
+        vel: vec(ROLL_START, 0), alive: true, missiles: this.loadout, cooldown: 0,
+        alt: 0, phase: 'roll', launchRange: lr(),
       });
       this.fighters.push({
         id: `B${i}`, team: 'B', name: nB[i]!,
-        pos: vec(9_000, base + (rnd() - 0.5) * 4_000),
-        vel: vec(-FIGHTER_SPEED, 0), alive: true, missiles: this.loadout, cooldown: 0, launchRange: lr(),
+        pos: vec(baseX, base + (rnd() - 0.5) * 800),
+        vel: vec(-ROLL_START, 0), alive: true, missiles: this.loadout, cooldown: 0,
+        alt: 0, phase: 'roll', launchRange: lr(),
       });
     }
+  }
+
+  /** Fighters still airborne AND engaged (co-altitude) — valid weapon
+   * targets. A plane on its takeoff roll or climb-out is not yet a shooter
+   * or a target. */
+  private combatants(team: Team): Fighter[] {
+    return this.fighters.filter((f) => f.alive && f.team === team && f.phase === 'combat');
+  }
+
+  /** Ground roll → rotate → climb to the co-altitude, then hand off to the
+   * combat AI. Heading is held down the runway (toward the centre). */
+  private takeoff(f: Fighter, dt: number): void {
+    const dir = norm(f.vel) > 1e-6 ? scale(f.vel, 1 / norm(f.vel)) : vec(Math.sign(f.pos.x) < 0 ? 1 : -1, 0);
+    let speed = norm(f.vel);
+    if (f.phase === 'roll') {
+      speed = Math.min(FIGHTER_SPEED, speed + ROLL_ACCEL * dt);
+      if (speed >= ROTATE_SPEED) f.phase = 'climb';
+    } else {
+      speed = Math.min(FIGHTER_SPEED, speed + ROLL_ACCEL * 0.5 * dt);
+      f.alt = Math.min(COMBAT_ALT, f.alt + CLIMB_RATE * dt);
+      if (f.alt >= COMBAT_ALT && speed >= FIGHTER_SPEED * 0.9) {
+        f.phase = 'combat';
+        f.alt = COMBAT_ALT;
+      }
+    }
+    f.vel = scale(dir, speed);
+    f.pos = add(f.pos, scale(f.vel, dt));
   }
 
   living(team: Team): Fighter[] {
@@ -195,20 +244,30 @@ export class Dogfight {
       this.living('B').length === 0 ||
       // Ordnance expended and none in flight — no gun, so it's decided.
       (this.fighters.every((f) => !f.alive || f.missiles === 0) && missiles.every((m) => !m.alive)) ||
-      // Stalemate: equal-energy survivors that never gain a firing
-      // solution circle forever; with nothing in the air, call it.
-      (t - this.lastAction > 35 && missiles.every((m) => !m.alive))
+      // Stalemate: once combat is JOINED (a shot has been fired), if
+      // equal-energy survivors then circle without a firing solution and
+      // nothing is in the air for a while, call it. Never fires during
+      // the takeoff/approach, when no shot has happened yet.
+      (this.shots > 0 && t - this.lastAction > 35 && missiles.every((m) => !m.alive))
     ) {
       this.finish();
       return;
     }
 
-    // ---- aircraft: pick target, evade incoming, else pursue + fire ----
+    // ---- aircraft: take off, then pick target / evade / pursue + fire ----
     for (const f of this.fighters) {
       if (!f.alive) continue;
       f.cooldown = Math.max(0, f.cooldown - dt);
+      // Still getting airborne: roll/rotate/climb, no weapons.
+      if (f.phase !== 'combat') {
+        this.takeoff(f, dt);
+        continue;
+      }
+      // Pursue any living enemy (even one still climbing), but only fire
+      // at co-altitude combatants.
       const foes = this.living(other(f.team));
       if (foes.length === 0) continue;
+      const targets = this.combatants(other(f.team));
 
       let threat: Missile | null = null;
       let threatRange = THREAT_RANGE;
@@ -242,8 +301,8 @@ export class Dogfight {
       f.vel = turnToward(f.vel, desired, wRate * dt);
       f.pos = add(f.pos, scale(f.vel, dt));
 
-      if (!threat && f.missiles > 0 && f.cooldown <= 0) {
-        const tgt = nearest(f, foes);
+      if (!threat && f.missiles > 0 && f.cooldown <= 0 && targets.length > 0) {
+        const tgt = nearest(f, targets);
         const los = sub(tgt.pos, f.pos);
         const rng = norm(los);
         const off = Math.acos(Math.max(-1, Math.min(1, dot(los, f.vel) / (rng * norm(f.vel) || 1))));

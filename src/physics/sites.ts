@@ -125,7 +125,7 @@ export const SITES: readonly Site[] = [
     id: 'far-runway-a',
     body: 'earth',
     name: 'Meridian Runway A',
-    angle: Math.PI - 20_000 / R,
+    angle: Math.PI - 11_000 / R, // opposing strips ~22 km apart flank the base
     type: 'runway',
     halfLength: 2_000,
     corridor: 'both',
@@ -135,7 +135,7 @@ export const SITES: readonly Site[] = [
     id: 'far-runway-b',
     body: 'earth',
     name: 'Meridian Runway B',
-    angle: Math.PI + 20_000 / R,
+    angle: Math.PI + 11_000 / R,
     type: 'runway',
     halfLength: 2_000,
     corridor: 'both',
