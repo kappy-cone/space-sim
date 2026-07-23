@@ -453,7 +453,19 @@ export class Vab {
         </div>`;
       })
       .join('');
-    this.stagingEl.innerHTML = `<h3>Staging (burns top→bottom)</h3>${rows}`;
+    // Deployables ride the same sequence in flight (space steps through
+    // separations first, then these) — shown here so the order is legible
+    // before launch. Manual keys (G/P) fire them anytime.
+    const deployables: string[] = [];
+    if (c.geometry.legs.length > 0) deployables.push('Deploy landing legs (G)');
+    if (c.geometry.chutes.length > 0) deployables.push('Deploy parachute (P)');
+    const tail =
+      deployables.length > 0
+        ? `<div class="stage-row"><div class="stage-row-head"><b>Then</b></div>${deployables
+            .map((d) => `<div class="stage-part">${d}</div>`)
+            .join('')}</div>`
+        : '';
+    this.stagingEl.innerHTML = `<h3>Staging (burns top→bottom)</h3>${rows}${tail}`;
     // Clicking a listed component selects it on the vehicle.
     this.stagingEl.querySelectorAll<HTMLElement>('.stage-part').forEach((el) => {
       el.onclick = () => {

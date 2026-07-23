@@ -84,6 +84,14 @@ export class Flight3D {
   /** Impact predictor result: sim-plane angle + seconds from now. */
   private impact: { angle: number; dt: number } | null = null;
 
+  /** KSP-style staging sequence: separations plus deployables. Entries
+   * are "consumed" implicitly when the sim state already reflects them
+   * (autopilot separations, manual P/G deploys), so space always
+   * triggers the next action that still makes sense. */
+  private stagingEntries: { kind: 'sep' | 'legs' | 'chutes'; afterStage: number; label: string }[] = [];
+  private consumedEntries = new Set<number>();
+  private stageBtn!: HTMLButtonElement;
+
   private hudValues = new Map<string, HTMLElement>();
   private propFill!: HTMLElement;
   private landingPanel!: HTMLElement;
@@ -158,6 +166,18 @@ export class Flight3D {
         { y0: 0.8, y1: 1, r0: 0.07, r1: 0 },
       ]),
     );
+
+    // Staging sequence: all separations in burn order, then deployables
+    // (terminal-descent devices by default; P/G still fire them anytime).
+    for (let i = 0; i + 1 < compiled.vehicle.stages.length; i++) {
+      this.stagingEntries.push({ kind: 'sep', afterStage: i, label: `Separate stage ${i + 1}` });
+    }
+    if (compiled.geometry.legs.length > 0) {
+      this.stagingEntries.push({ kind: 'legs', afterStage: -1, label: 'Deploy landing legs' });
+    }
+    if (compiled.geometry.chutes.length > 0) {
+      this.stagingEntries.push({ kind: 'chutes', afterStage: -1, label: 'Deploy parachute' });
+    }
 
     this.geomLength = compiled.geometry.length;
     this.camera.minDist = 8;
@@ -304,7 +324,8 @@ export class Flight3D {
     this.apBtn.onclick = () => this.toggleAutopilot();
     const stageBtn = document.createElement('button');
     stageBtn.textContent = 'Stage (space)';
-    stageBtn.onclick = () => this.sim.stage();
+    stageBtn.onclick = () => this.nextStageAction();
+    this.stageBtn = stageBtn;
     const warpDown = document.createElement('button');
     warpDown.textContent = '−';
     warpDown.onclick = () => this.setWarp(this.warpIndex - 1);
@@ -361,6 +382,32 @@ export class Flight3D {
     this.launchBtn.disabled = true;
   }
 
+  /** First staging entry the sim state hasn't already satisfied. */
+  private nextStagingIndex(): number {
+    for (let i = 0; i < this.stagingEntries.length; i++) {
+      if (this.consumedEntries.has(i)) continue;
+      const e = this.stagingEntries[i]!;
+      if (e.kind === 'sep' && this.sim.stageIndex > e.afterStage) continue;
+      if (e.kind === 'legs' && this.sim.legsDeployed) continue;
+      if (e.kind === 'chutes' && this.sim.chutesDeployed) continue;
+      return i;
+    }
+    return -1;
+  }
+
+  private nextStageAction(): void {
+    const i = this.nextStagingIndex();
+    if (i < 0) {
+      this.sim.stage(); // sequence exhausted: raw staging (drops nothing if none left)
+      return;
+    }
+    const e = this.stagingEntries[i]!;
+    this.consumedEntries.add(i);
+    if (e.kind === 'sep') this.sim.stage();
+    else if (e.kind === 'legs') this.sim.deployLegs();
+    else this.sim.deployChutes();
+  }
+
   /** Right-drag steering: pitch the commanded attitude in the orbital
    * plane (the sim is 3-DOF planar; steering input maps to in-plane
    * pitch, the one axis that exists). */
@@ -403,7 +450,7 @@ export class Flight3D {
     if (e.key === ' ') {
       e.preventDefault();
       if (!this.running) this.launch();
-      else this.sim.stage();
+      else this.nextStageAction();
     } else if (e.key === '.') this.setWarp(this.warpIndex + 1);
     else if (e.key === ',') this.setWarp(this.warpIndex - 1);
     else if (e.key === 'a') this.toggleAutopilot();
@@ -933,6 +980,11 @@ export class Flight3D {
       s.q > 1_000 ? (margin >= 0.2 ? 'good' : margin >= 0 ? 'warn' : 'bad') : '',
     );
     this.set('gimbal', `${((s.gimbal * 180) / Math.PI).toFixed(1)}°`);
+
+    // Stage button shows the next sequence action, KSP-style.
+    const nextIdx = this.nextStagingIndex();
+    this.stageBtn.textContent =
+      nextIdx >= 0 ? `${this.stagingEntries[nextIdx]!.label} (space)` : 'Stage (space)';
 
     if (stage) {
       const full = stage.tanks.reduce((sum, t) => sum + t.propellantMass, 0);
