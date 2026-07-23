@@ -4,7 +4,7 @@
 // envelope and reach the analytic terminal velocity.
 
 import { describe, expect, it } from 'vitest';
-import { EARTH } from './bodies';
+import { EARTH, bodyById } from './bodies';
 import { engineById, tankById } from './parts';
 import { LandingAutopilot } from './landing';
 import { GeomPart, VehicleGeometry } from './massmodel';
@@ -131,6 +131,59 @@ describe('suicide burn: the autopilot flies the predictor', () => {
     if (fail?.type === 'landingFailed') {
       expect(fail.reason).toContain('tipped over');
       expect(fail.reason).not.toContain('vertical speed'); // only the real culprit named
+    }
+  });
+});
+
+describe('moon landing', () => {
+  it('suicide-burns to a legs-down landing on the airless moon', () => {
+    const { vehicle } = lander();
+    const moon = bodyById('moon');
+    const sim = new Sim(vehicle, moon);
+    const ap = new LandingAutopilot();
+    // Free fall from 5 km above the lunar surface, zero surface-relative
+    // speed. No atmosphere: the whole descent is propulsive.
+    const r = moon.radius + 5_000;
+    sim.landed = false;
+    sim.state = { r: vec(r, 0), v: vec(0, moon.rotationRate * r), theta: 0, omega: 0, m: sim.state.m, t: 0 };
+    while (ap.phase !== 'done' && ap.phase !== 'failed' && sim.state.t < 600) {
+      ap.update(sim);
+      sim.step(0.05);
+    }
+    expect(ap.phase).toBe('done');
+    const landed = sim.events.find((e) => e.type === 'landed');
+    expect(landed).toBeDefined();
+    if (landed?.type === 'landed') {
+      expect(landed.vSpeed).toBeLessThan(TOUCHDOWN_LIMITS.legs.vSpeed);
+    }
+    // Airless: no dynamic pressure and no aero Δv loss, ever.
+    expect(sim.q).toBe(0);
+    expect(sim.aeroLoss).toBe(0);
+    // Frozen after landing on the (slowly) rotating moon.
+    const altBefore = sim.radarAltitude;
+    sim.step(600);
+    expect(Math.abs(sim.radarAltitude - altBefore)).toBeLessThan(1e-6);
+  });
+
+  it('nulls a 25 m/s horizontal drift before touchdown (no drag to help)', () => {
+    const { vehicle } = lander();
+    const moon = bodyById('moon');
+    const sim = new Sim(vehicle, moon);
+    const ap = new LandingAutopilot();
+    const r = moon.radius + 6_000;
+    sim.landed = false;
+    // Translated descent: 25 m/s eastward surface-relative drift.
+    sim.state = { r: vec(r, 0), v: vec(0, moon.rotationRate * r + 25), theta: 0, omega: 0, m: sim.state.m, t: 0 };
+    while (ap.phase !== 'done' && ap.phase !== 'failed' && sim.state.t < 900) {
+      ap.update(sim);
+      sim.step(0.05);
+    }
+    expect(ap.phase).toBe('done');
+    const landed = sim.events.find((e) => e.type === 'landed');
+    expect(landed).toBeDefined();
+    if (landed?.type === 'landed') {
+      expect(landed.hSpeed).toBeLessThan(TOUCHDOWN_LIMITS.legs.hSpeed);
+      expect(landed.vSpeed).toBeLessThan(TOUCHDOWN_LIMITS.legs.vSpeed);
     }
   });
 });
