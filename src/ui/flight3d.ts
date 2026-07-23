@@ -10,7 +10,7 @@ import { PARTS, partById } from '../craft/catalog';
 import { Compiled } from '../craft/compile';
 import { Craft, placements } from '../craft/craft';
 import { Autopilot, defaultPlan } from '../physics/autopilot';
-import { BODIES } from '../physics/bodies';
+import { BODIES, bodyById, bodyOrbitState } from '../physics/bodies';
 import { LandingAutopilot } from '../physics/landing';
 import { Sim, TOUCHDOWN_LIMITS } from '../physics/sim';
 import { stageThrustAtPressure } from '../physics/vehicle';
@@ -28,11 +28,13 @@ import {
   translation,
   v3,
 } from '../gl/mat4';
-import { finMesh, groundCapMesh, segmentsMesh, sphereMesh, terrainColor } from '../gl/mesh';
+import { finMesh, groundCapMesh, moonColor, segmentsMesh, sphereMesh, terrainColor } from '../gl/mesh';
 import { Renderer } from '../gl/renderer';
 import { fmtDistance, fmtMass, fmtSpeed, fmtTime } from './format';
 
-const WARP_STEPS = [1, 2, 5, 10, 25, 100, 1000];
+// 10,000× exists for translunar coasts (a transfer is ~5 days); coasts
+// ride analytic Kepler so high warp costs nothing in accuracy.
+const WARP_STEPS = [1, 2, 5, 10, 25, 100, 1000, 10_000];
 
 interface PartInstance {
   partId: string;
@@ -67,7 +69,9 @@ export class Flight3D {
   private canvas: HTMLCanvasElement;
 
   private instances: PartInstance[] = [];
-  private trail: { x: number; y: number }[] = [];
+  /** Trail points in the CURRENT reference frame, with the sim time each
+   * was recorded at — needed to convert them across SOI transitions. */
+  private trail: { x: number; y: number; t: number }[] = [];
   private lastTrailT = -1;
   private geomLength = 20;
   private landAp = new LandingAutopilot();
@@ -134,10 +138,15 @@ export class Flight3D {
         f ? finMesh(f.cr, f.ct, f.span, f.sweep, f.thickness) : segmentsMesh(def.segments),
       );
     }
-    this.renderer.mesh('planet', () => sphereMesh(48, 72, terrainColor));
-    // Local ground: 60 km cap anchored at the sub-vehicle surface point,
-    // 0.15 m below the datum so the pad deck stays proud of it.
-    this.renderer.mesh('groundcap', () => groundCapMesh(this.sim.body.radius, 60_000, 0.15));
+    // One terrain sphere + local ground cap per body (the reference body
+    // is mutable across SOI transitions). The cap is a 60 km patch
+    // anchored at the sub-vehicle surface point, 0.15 m below the datum
+    // so the pad deck stays proud of it.
+    this.renderer.mesh('planet-earth', () => sphereMesh(48, 72, terrainColor));
+    this.renderer.mesh('planet-moon', () => sphereMesh(48, 72, moonColor));
+    for (const b of BODIES) {
+      this.renderer.mesh(`cap-${b.id}`, () => groundCapMesh(b.radius, 60_000, 0.15));
+    }
     this.renderer.mesh('shell', () => sphereMesh(24, 36));
     this.renderer.mesh('plume', () => segmentsMesh([{ y0: -1, y1: 0, r0: 0.45, r1: 1 }]));
     this.renderer.mesh('pad', () => segmentsMesh([{ y0: 0, y1: 1, r0: 1, r1: 0 }]));
@@ -162,6 +171,8 @@ export class Flight3D {
 
     this.buildHud();
     this.buildControls();
+    // Debug hook, same convention as window.__vab in the builder.
+    (window as unknown as { __flight?: Flight3D }).__flight = this;
     window.addEventListener('keydown', this.onKey);
     new ResizeObserver(() => this.resize()).observe(root);
     this.resize();
@@ -188,6 +199,7 @@ export class Flight3D {
     const rows: [string, string][] = [
       ['met', 'MET'],
       ['phase', 'Phase'],
+      ['refbody', 'Ref body'],
       ['alt', 'Altitude'],
       ['air', 'Airspeed'],
       ['orb', 'Orbital vel'],
@@ -434,7 +446,7 @@ export class Flight3D {
         ticks++;
         if (s.state.t - this.lastTrailT > 0.5) {
           this.lastTrailT = s.state.t;
-          this.trail.push({ x: s.state.r.x, y: s.state.r.y });
+          this.trail.push({ x: s.state.r.x, y: s.state.r.y, t: s.state.t });
           if (this.trail.length > 4000) this.trail.splice(0, 1000);
         }
       }
@@ -533,6 +545,21 @@ export class Flight3D {
         case 'crash':
           text = `Impact at ${fmtSpeed(ev.speed)}`;
           break;
+        case 'soiTransition': {
+          const to = bodyById(ev.to);
+          text = `Entered the ${to.name} sphere of influence`;
+          // Convert the trail to the new reference frame: each point moves
+          // by the child body's ephemeris offset at its own recorded time,
+          // giving the historical body-relative path.
+          const child = to.parent === ev.from ? to : bodyById(ev.from);
+          const sign = to.parent === ev.from ? -1 : 1;
+          for (const p of this.trail) {
+            const eph = bodyOrbitState(child, p.t);
+            p.x += sign * eph.r.x;
+            p.y += sign * eph.r.y;
+          }
+          break;
+        }
       }
       const div = document.createElement('div');
       div.textContent = `T+${fmtTime(ev.t)}  ${text}`;
@@ -568,8 +595,9 @@ export class Flight3D {
     const near = Math.max(0.5, this.camera.dist * 0.02);
     const far = Math.max(1e5, this.camera.dist * 40 + 2 * s.body.radius + 8e8);
     // Sky: blends from ground blue through stratospheric dark to space
-    // black as the vehicle climbs out of the atmosphere.
-    const skyF = Math.pow(Math.max(0, 1 - s.altitude / 75_000), 1.6);
+    // black as the vehicle climbs out of the atmosphere. Airless bodies
+    // get a black sky at any altitude.
+    const skyF = s.body.atmosphere ? Math.pow(Math.max(0, 1 - s.altitude / 75_000), 1.6) : 0;
     const clear: [number, number, number] = [
       0.01 + 0.33 * skyF,
       0.012 + 0.5 * skyF,
@@ -584,18 +612,20 @@ export class Flight3D {
     // jitters ~0.5 m at Earth scale in float32 — push it behind the pad
     // and the local ground cap instead of letting them z-fight (the
     // "flashing ground at launch" bug).
-    this.renderer.draw('planet', multiply(spin, scaling(s.body.radius)), [1, 1, 1], 1, false, false, true);
+    const planetMesh = s.body.id === 'moon' ? 'planet-moon' : 'planet-earth';
+    this.renderer.draw(planetMesh, multiply(spin, scaling(s.body.radius)), [1, 1, 1], 1, false, false, true);
     // Local terrain cap anchored at the sub-vehicle surface point: its
     // camera-relative translation is small, so the ground the player
     // actually looks at is depth-stable.
     if (s.altitude < 30_000) {
       const upA = Math.atan2(s.state.r.y, s.state.r.x);
       const capW = this.toWorld(s.body.radius * Math.cos(upA), s.body.radius * Math.sin(upA));
-      // Tint from the terrain paint at the sub-vehicle point (sim plane =
+      // Tint from the body's paint at the sub-vehicle point (sim plane =
       // equator, lat 0; the launch site sits at longitude 90°).
-      const tint = terrainColor(0, Math.PI / 2 - upA + s.body.rotationRate * s.state.t);
+      const lon = Math.PI / 2 - upA + s.body.rotationRate * s.state.t;
+      const tint = s.body.id === 'moon' ? moonColor(0, lon) : terrainColor(0, lon);
       this.renderer.draw(
-        'groundcap',
+        `cap-${s.body.id}`,
         multiply(translation(capW.x, capW.y, capW.z), rotationZ(-upA)),
         tint,
       );
@@ -606,49 +636,74 @@ export class Flight3D {
       this.renderer.draw('shell', scaling(s.body.radius + 90_000), [0.3, 0.5, 0.95], 0.05);
     }
 
-    // Sibling bodies (the moon): rendered in the sky at their orbital
-    // position — patched-conic SOI transitions are future work; today the
-    // sim's gravity is single-body and this is scenery with real ephemeris.
+    // Child bodies on their real orbits (same ephemeris the sim's SOI
+    // logic uses), and the parent body when the reference is a moon.
     for (const b of BODIES) {
       if (b.parent !== s.body.id || !b.orbit) continue;
-      const n = Math.sqrt(s.body.mu / (b.orbit.a ** 3));
-      const ang = b.orbit.phase0 + n * s.state.t;
-      const bw = this.toWorld(b.orbit.a * Math.cos(ang), b.orbit.a * Math.sin(ang));
+      const eph = bodyOrbitState(b, s.state.t);
+      const bw = this.toWorld(eph.r.x, eph.r.y);
+      const bMesh = b.id === 'moon' ? 'planet-moon' : 'planet-earth';
+      const bSpin = rotationZ(-b.rotationRate * s.state.t);
       this.renderer.draw(
-        'shell',
-        multiply(translation(bw.x, bw.y, bw.z), scaling(b.radius)),
-        [0.62, 0.6, 0.58],
+        bMesh,
+        multiply(multiply(translation(bw.x, bw.y, bw.z), bSpin), scaling(b.radius)),
+        [1, 1, 1],
+      );
+    }
+    if (s.body.parent) {
+      const parent = bodyById(s.body.parent);
+      const eph = bodyOrbitState(s.body, s.state.t);
+      const pw = this.toWorld(-eph.r.x, -eph.r.y);
+      const pMesh = parent.id === 'moon' ? 'planet-moon' : 'planet-earth';
+      const pSpin = rotationZ(-parent.rotationRate * s.state.t);
+      this.renderer.draw(
+        pMesh,
+        multiply(multiply(translation(pw.x, pw.y, pw.z), pSpin), scaling(parent.radius)),
+        [1, 1, 1],
       );
     }
 
     // Launch pad (rotates with the body): a platform up close, a beacon
-    // cone when zoomed out to map scales.
-    const padA = s.body.rotationRate * s.state.t;
-    const padW = this.toWorld(s.body.radius * Math.cos(padA), s.body.radius * Math.sin(padA));
-    if (this.camera.dist < 3_000) {
-      const padModel = multiply(
-        multiply(translation(padW.x, padW.y, padW.z), rotationZ(-padA)),
-        scalingXYZ(22, 0.4, 22),
-      );
-      this.renderer.draw('padDisc', padModel, [0.3, 0.32, 0.36]);
-    } else {
-      const padScale = this.camera.dist * 0.012;
-      this.renderer.draw(
-        'pad',
-        multiply(translation(padW.x, padW.y, padW.z), scaling(padScale)),
-        [1.0, 0.78, 0.34],
-        1,
-        true,
-      );
+    // cone when zoomed out to map scales. The pad is the Earth launch
+    // site — not drawn when another body is the reference.
+    if (s.body.id === 'earth') {
+      const padA = s.body.rotationRate * s.state.t;
+      const padW = this.toWorld(s.body.radius * Math.cos(padA), s.body.radius * Math.sin(padA));
+      if (this.camera.dist < 3_000) {
+        const padModel = multiply(
+          multiply(translation(padW.x, padW.y, padW.z), rotationZ(-padA)),
+          scalingXYZ(22, 0.4, 22),
+        );
+        this.renderer.draw('padDisc', padModel, [0.3, 0.32, 0.36]);
+      } else {
+        const padScale = this.camera.dist * 0.012;
+        this.renderer.draw(
+          'pad',
+          multiply(translation(padW.x, padW.y, padW.z), scaling(padScale)),
+          [1.0, 0.78, 0.34],
+          1,
+          true,
+        );
+      }
     }
 
     // Orbit line + trail, rebased to the vehicle for float precision.
+    // Elliptic: the full conic. Hyperbolic (e.g. a lunar flyby leg): the
+    // arc between asymptotes, clipped to the reference body's SOI scale.
     const el = s.elements;
-    if (el.e < 1 && el.rApo > s.body.radius * 0.5) {
-      const pts = new Float32Array(129 * 3);
+    if ((el.e < 1 && el.rApo > s.body.radius * 0.5) || (el.e >= 1 && !s.landed)) {
       const p = el.a * (1 - el.e * el.e);
+      const rMax = Math.min(isFinite(s.body.soi) ? s.body.soi * 1.05 : Infinity, Math.abs(el.a) * 40 + 1e9);
+      let nuMax = Math.PI;
+      if (el.e >= 1) {
+        // True anomaly of the asymptote, backed off; also clip to rMax.
+        const nuAsym = Math.acos(-1 / el.e);
+        const cosClip = (p / rMax - 1) / el.e;
+        nuMax = Math.min(nuAsym - 0.02, Math.acos(Math.max(-1, Math.min(1, cosClip))));
+      }
+      const pts = new Float32Array(129 * 3);
       for (let i = 0; i <= 128; i++) {
-        const nu = (i / 128) * 2 * Math.PI;
+        const nu = -nuMax + (i / 128) * 2 * nuMax;
         const rad = p / (1 + el.e * Math.cos(nu));
         const ang = el.argPeri + (el.h >= 0 ? nu : -nu);
         const wpt = this.toWorld(rad * Math.cos(ang), rad * Math.sin(ang));
@@ -846,6 +901,7 @@ export class Flight3D {
     const stage = s.vehicle.stages[s.stageIndex];
     this.set('met', `T+ ${fmtTime(s.state.t)}`);
     this.set('phase', s.crashed ? 'LOST' : this.autopilotOn ? this.ap.phase : 'manual');
+    this.set('refbody', s.body.name, s.body.id === 'earth' ? '' : 'good');
     this.set('alt', fmtDistance(s.altitude));
     this.set('air', fmtSpeed(norm(s.airspeedVec)));
     this.set('orb', fmtSpeed(norm(s.state.v)));
@@ -934,6 +990,9 @@ export class Flight3D {
       );
     } else if (s.hasLanded) this.showBanner('Landed', 'orbit');
     else if (s.inOrbit) this.showBanner('Orbit', 'orbit');
+    // Hide a stale banner when its condition lapses (e.g. inOrbit is
+    // reset by an SOI transition — the old conic no longer exists).
+    else this.banner.style.display = 'none';
   }
 
   private showBanner(text: string, cls: string): void {

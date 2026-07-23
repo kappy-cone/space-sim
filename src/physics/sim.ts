@@ -26,7 +26,7 @@
 // integrates to  Δ|v| = idealDv − steeringLoss − aeroLoss − gravityLoss,
 // an exact identity (trapezoid-accumulated) — see the validation suite.
 
-import { CelestialBody, EARTH } from './bodies';
+import { CelestialBody, EARTH, bodyById, bodyOrbitState, childrenOf } from './bodies';
 import { FlightState, rk4Step } from './integrator';
 import { Elements, elementsFromState, propagateKepler } from './kepler';
 import { MassProperties, massProperties, synthesizeGeometry } from './massmodel';
@@ -58,6 +58,7 @@ export type SimEvent =
   | { type: 'chuteDeployed'; t: number }
   | { type: 'legsDeployed'; t: number }
   | { type: 'landed'; t: number; vSpeed: number; hSpeed: number; tilt: number }
+  | { type: 'soiTransition'; t: number; from: string; to: string }
   | { type: 'landingFailed'; t: number; reason: string }
   | { type: 'crash'; t: number; speed: number };
 
@@ -77,7 +78,9 @@ const KD = 1.4;
 
 export class Sim {
   readonly vehicle: Vehicle;
-  readonly body: CelestialBody;
+  /** Active reference body — mutable: patched-conic SOI transitions
+   * re-reference the state vector to a new primary at the boundary. */
+  body: CelestialBody;
   state: FlightState;
   stageIndex = 0;
   propellant: number;
@@ -302,22 +305,115 @@ export class Sim {
       } else if (this.burning || this.actualThrottle > 0.01 || this.altitude < atmTop) {
         remaining -= this.stepPowered(Math.min(remaining, MAX_POWERED_DT));
       } else {
-        // On-rails coast: exact Kepler; attitude assumed RCS-held.
-        const vPre = norm(this.state.v);
-        const { r, v } = propagateKepler(this.state.r, this.state.v, remaining, this.body.mu);
-        // Gravity is the only force on rails, so its Δv-budget term is
-        // exactly the speed change (∫g·sinγ dt = |v₀| − |v₁|).
-        this.gravityLoss += vPre - norm(v);
-        const err = wrapPi(this.targetAngle() - this.state.theta);
-        const slew = Math.min(Math.abs(err), COAST_SLEW_RATE * remaining) * Math.sign(err);
-        this.state = { r, v, theta: this.state.theta + slew, omega: 0, m: this.state.m, t: this.state.t + remaining };
-        this.q = 0;
-        this.aoa = 0;
-        this.mach = 0;
-        remaining = 0;
-        this.checkOrbit();
+        remaining -= this.stepRails(remaining);
       }
     }
+  }
+
+  /**
+   * On-rails coast: exact Kepler arcs with patched-conic SOI handoffs.
+   * Sub-steps are bounded so an SOI boundary cannot be tunneled through:
+   * the bound divides the distance to the nearest boundary by a rigorous
+   * speed ceiling (energy conservation caps future speed at
+   * √(v² + 2μ/R_body) — all potential energy converted by the surface —
+   * plus the child body's own orbital speed). When a sub-step lands
+   * inside a new sphere of influence, the crossing time is bisected to
+   * 1 ms and the state vector is re-referenced to the new primary there.
+   * Gravity is the only force on rails, so the Δv-budget gravity term is
+   * exactly the speed change per arc (∫g·sinγ dt = |v₀| − |v₁|); the
+   * frame jump at a handoff is never counted.
+   */
+  private stepRails(dtTotal: number): number {
+    let remaining = dtTotal;
+    while (remaining > 1e-9) {
+      const dt = Math.min(remaining, this.railsSafeDt());
+      const r0 = this.state.r;
+      const v0 = this.state.v;
+      const t0 = this.state.t;
+      let arc = propagateKepler(r0, v0, dt, this.body.mu);
+      let used = dt;
+      let target = this.soiTarget(arc.r, t0 + dt);
+      if (target) {
+        // Bisect the crossing time within [0, dt].
+        let lo = 0;
+        let hi = dt;
+        while (hi - lo > 1e-3) {
+          const mid = (lo + hi) / 2;
+          const probe = propagateKepler(r0, v0, mid, this.body.mu);
+          if (this.soiTarget(probe.r, t0 + mid)) hi = mid;
+          else lo = mid;
+        }
+        used = hi;
+        arc = propagateKepler(r0, v0, used, this.body.mu);
+        target = this.soiTarget(arc.r, t0 + used);
+      }
+      this.gravityLoss += norm(v0) - norm(arc.v);
+      const err = wrapPi(this.targetAngle() - this.state.theta);
+      const slew = Math.min(Math.abs(err), COAST_SLEW_RATE * used) * Math.sign(err);
+      this.state = { r: arc.r, v: arc.v, theta: this.state.theta + slew, omega: 0, m: this.state.m, t: t0 + used };
+      remaining -= used;
+      if (target) this.reReference(target);
+      this.q = 0;
+      this.aoa = 0;
+      this.mach = 0;
+      this.checkOrbit();
+      if (this.crashed) break;
+    }
+    return dtTotal - remaining;
+  }
+
+  /** Longest rails sub-step guaranteed not to skip an SOI boundary:
+   * (distance to the nearest boundary) / (speed ceiling), halved. The
+   * ceiling adds the fastest child's own orbital speed, so it bounds the
+   * closing rate on a moving boundary too. */
+  private railsSafeDt(): number {
+    let d = Infinity;
+    let vChild = 0;
+    for (const c of childrenOf(this.body.id)) {
+      const eph = bodyOrbitState(c, this.state.t);
+      d = Math.min(d, Math.abs(norm(sub(this.state.r, eph.r)) - c.soi));
+      vChild = Math.max(vChild, norm(eph.v));
+    }
+    if (this.body.parent) {
+      d = Math.min(d, Math.abs(this.body.soi - norm(this.state.r)));
+    }
+    if (!isFinite(d)) return Infinity; // root body without children: free run
+    const rn = norm(this.state.r);
+    // Energy bound: v(t)² ≤ v₀² + 2μ(1/r_min − 1/r₀) with r_min ≥ surface.
+    const vCeil = Math.sqrt(dot(this.state.v, this.state.v) + (2 * this.body.mu) / Math.min(rn, this.body.radius));
+    return Math.max(1, (0.5 * d) / (vCeil + vChild));
+  }
+
+  /** Body whose SOI claims the point (r, t), or null to stay put. */
+  private soiTarget(r: Vec2, t: number): CelestialBody | null {
+    for (const c of childrenOf(this.body.id)) {
+      const eph = bodyOrbitState(c, t);
+      if (norm(sub(r, eph.r)) < c.soi) return c;
+    }
+    if (this.body.parent && norm(r) >= this.body.soi) return bodyById(this.body.parent);
+    return null;
+  }
+
+  /**
+   * Patched-conic handoff: re-reference the state vector to the new
+   * primary and continue on a new conic. Position and velocity are
+   * continuous in inertial space; the Δv ledger is frame-relative and is
+   * deliberately not touched by the jump in |v|.
+   */
+  private reReference(to: CelestialBody): void {
+    const t = this.state.t;
+    if (to.parent === this.body.id) {
+      const eph = bodyOrbitState(to, t);
+      this.state.r = sub(this.state.r, eph.r);
+      this.state.v = sub(this.state.v, eph.v);
+    } else {
+      const eph = bodyOrbitState(this.body, t);
+      this.state.r = add(this.state.r, eph.r);
+      this.state.v = add(this.state.v, eph.v);
+    }
+    this.events.push({ type: 'soiTransition', t, from: this.body.id, to: to.id });
+    this.body = to;
+    this.inOrbit = false; // new primary — orbit is re-adjudicated
   }
 
   /** Pin the vehicle to the rotating surface at restAngle0. */
@@ -486,6 +582,11 @@ export class Sim {
     }
     this.checkContact();
     this.checkOrbit();
+    // Powered steps are ≤ 50 ms, so an SOI boundary crossed mid-step is
+    // re-referenced here with negligible boundary error (≤ v·dt ≈ 550 m
+    // against a 66,200 km lunar SOI).
+    const soi = this.soiTarget(this.state.r, this.state.t);
+    if (soi && !this.crashed) this.reReference(soi);
     return dt;
   }
 

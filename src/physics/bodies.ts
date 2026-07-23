@@ -6,6 +6,7 @@
 
 import { MU_EARTH, OMEGA_EARTH, R_EARTH } from './constants';
 import { density as earthDensity, pressure as earthPressure } from './atmosphere';
+import { Vec2, vec } from './vec2';
 
 export interface CelestialBody {
   id: string;
@@ -64,13 +65,26 @@ export function laplaceSoi(a: number, muBody: number, muParent: number): number 
 }
 
 /**
- * SCAFFOLDING for patched conics: which body's SOI contains a point at
- * distance `r` from `primary`'s center toward a child at distance `d`?
- * Full transitions (state re-referencing at the boundary) are future work;
- * the sim does not call this yet.
+ * Parent-relative position and velocity of a body on its table orbit at
+ * absolute sim time t. The table orbits are circular and coplanar by
+ * design (the planar 3-DOF decision), so this is the exact two-body
+ * ephemeris: n = √(μ_parent/a³), r = a·(cos, sin)(φ₀ + n·t).
  */
-export function soiContains(body: CelestialBody, distanceFromBody: number): boolean {
-  return distanceFromBody < body.soi;
+export function bodyOrbitState(b: CelestialBody, t: number): { r: Vec2; v: Vec2 } {
+  if (!b.parent || !b.orbit) throw new Error(`${b.id} has no orbit`);
+  const parent = bodyById(b.parent);
+  const n = Math.sqrt(parent.mu / (b.orbit.a * b.orbit.a * b.orbit.a));
+  const ang = b.orbit.phase0 + n * t;
+  const c = Math.cos(ang);
+  const s = Math.sin(ang);
+  return {
+    r: vec(b.orbit.a * c, b.orbit.a * s),
+    v: vec(-b.orbit.a * n * s, b.orbit.a * n * c),
+  };
+}
+
+export function childrenOf(id: string): CelestialBody[] {
+  return BODIES.filter((b) => b.parent === id);
 }
 
 export function bodyById(id: string): CelestialBody {

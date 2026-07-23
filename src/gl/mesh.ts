@@ -184,6 +184,20 @@ export function terrainColor(lat: number, lon: number): [number, number, number]
 }
 
 /**
+ * Regolith paint for the moon: grey with darker maria patches. Same rules
+ * as terrainColor — deterministic layered sine noise, visual only.
+ */
+export function moonColor(lat: number, lon: number): [number, number, number] {
+  const n =
+    Math.sin(2.1 * lat + 0.4) * Math.cos(3.3 * lon + 2.2) +
+    0.6 * Math.sin(7.9 * lon + 1.0) * Math.cos(5.3 * lat + 0.7) +
+    0.3 * Math.sin(11 * lat + 13 * lon);
+  const g = n > 0.55 ? 0.34 : n > -0.2 ? 0.47 : 0.54; // maria / plains / highlands
+  const j = 1 + 0.05 * Math.sin(23 * lat + 31 * lon); // fine grain
+  return [g * j, g * j, g * j * 1.03];
+}
+
+/**
  * Local ground cap: a spherical-cap patch of body radius R, model origin at
  * the surface point, +y = local up. The global planet sphere's model origin
  * is the body center, so its MVP picks up float32 quantization ~0.5 m at
