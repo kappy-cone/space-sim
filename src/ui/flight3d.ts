@@ -13,7 +13,7 @@ import { Autopilot, defaultPlan } from '../physics/autopilot';
 import { BODIES, bodyById, bodyOrbitState } from '../physics/bodies';
 import { LandingAutopilot } from '../physics/landing';
 import { Sim, TOUCHDOWN_LIMITS } from '../physics/sim';
-import { stageIgnitionLimit, stageMinThrottle, stageThrustAtPressure } from '../physics/vehicle';
+import { massFromStage, stageIgnitionLimit, stageMinThrottle, stageThrustAtPressure } from '../physics/vehicle';
 import { engineById } from '../physics/parts';
 import { machDragFactor, speedOfSound } from '../physics/atmosphere';
 import { add, norm, perp, scale, sub, vec } from '../physics/vec2';
@@ -59,10 +59,43 @@ interface PartInstance {
   pExit: number;
 }
 
+/**
+ * One live vehicle in the scene. vessels[0] is the launched craft;
+ * further vessels are born from release pylons (air launch). The
+ * Flight3D singular fields hold the ACTIVE vessel's working set;
+ * bundles park everything else and swap on `[`/`]`.
+ */
+interface Vessel {
+  name: string;
+  sim: Sim;
+  compiled: Compiled;
+  instances: PartInstance[];
+  geomLength: number;
+  trail: { x: number; y: number; t: number }[];
+  lastTrailT: number;
+  seenEvents: number;
+  ap: Autopilot;
+  autopilotOn: boolean;
+  landAp: LandingAutopilot;
+  autoLand: boolean;
+  manualPitch: number;
+  stagingEntries: StagingEntry[];
+  consumedEntries: Set<number>;
+}
+
+interface StagingEntry {
+  kind: 'sep' | 'deploy' | 'nozzle' | 'release';
+  afterStage: number;
+  label: string;
+  effect?: 'legs' | 'chutes' | 'fairing';
+}
+
 export class Flight3D {
   private sim: Sim;
   private ap: Autopilot;
   private autopilotOn = true;
+  private vessels: Vessel[] = [];
+  private activeIndex = 0;
   private manualPitch = 0;
   private warpIndex = 0;
   private running = false;
@@ -78,7 +111,6 @@ export class Flight3D {
   /** Trail points in the CURRENT reference frame, with the sim time each
    * was recorded at — needed to convert them across SOI transitions. */
   private trail: { x: number; y: number; t: number }[] = [];
-  private lastTrailT = -1;
   private geomLength = 20;
   private landAp = new LandingAutopilot();
   private autoLand = false;
@@ -94,7 +126,7 @@ export class Flight3D {
    * are "consumed" implicitly when the sim state already reflects them
    * (autopilot separations, manual P/G deploys), so space always
    * triggers the next action that still makes sense. */
-  private stagingEntries: { kind: 'sep' | 'deploy' | 'nozzle'; afterStage: number; label: string; effect?: 'legs' | 'chutes' | 'fairing' }[] = [];
+  private stagingEntries: StagingEntry[] = [];
   private consumedEntries = new Set<number>();
   private stageBtn!: HTMLButtonElement;
 
@@ -127,29 +159,7 @@ export class Flight3D {
     }
 
     // Flatten the craft to renderable instances with burn-order indices.
-    const burnIndex = new Map<string, number>();
-    compiled.stages.forEach((cs, i) => cs.partIds.forEach((id) => burnIndex.set(id, i)));
-    for (const [id, pl] of placements(craft)) {
-      for (const inst of pl.instances) {
-        this.instances.push({
-          partId: id,
-          defId: pl.def.id,
-          isFin: !!pl.def.fin,
-          isLeg: pl.def.kind === 'leg',
-          height: pl.height,
-          hScale: pl.height / pl.def.height,
-          burnIndex: burnIndex.get(id) ?? 0,
-          x: inst.x,
-          y: inst.y,
-          z: inst.z,
-          angle: inst.angle,
-          color: pl.def.color,
-          engine: pl.def.kind === 'engine',
-          exitRadius: pl.def.radiusBottom,
-          pExit: plumeExitPressure(pl.def),
-        });
-      }
-    }
+    this.instances = buildInstances(compiled, craft);
 
     root.innerHTML = '';
     root.className = 'flight';
@@ -184,33 +194,27 @@ export class Flight3D {
       ]),
     );
 
-    // Staging sequence: separations in burn order with deploy states
-    // interleaved (fairing after the first separation, nozzle extensions
-    // when their stage becomes active), then terminal-descent deployables.
-    const vStages = compiled.vehicle.stages;
-    const hasNozzle = (k: number): boolean => !!vStages[k]?.engines.some((g) => g.engine.nozzleExtension);
-    const hasFairings = (compiled.geometry.fairings?.length ?? 0) > 0;
-    if (hasNozzle(0)) this.stagingEntries.push({ kind: 'nozzle', afterStage: 0, label: 'Extend nozzle' });
-    for (let i = 0; i + 1 < vStages.length; i++) {
-      this.stagingEntries.push({ kind: 'sep', afterStage: i, label: `Separate stage ${i + 1}` });
-      if (i === 0 && hasFairings) {
-        this.stagingEntries.push({ kind: 'deploy', effect: 'fairing', afterStage: -1, label: 'Jettison fairing' });
-      }
-      if (hasNozzle(i + 1)) {
-        this.stagingEntries.push({ kind: 'nozzle', afterStage: i + 1, label: 'Extend nozzle' });
-      }
-    }
-    if (vStages.length === 1 && hasFairings) {
-      this.stagingEntries.push({ kind: 'deploy', effect: 'fairing', afterStage: -1, label: 'Jettison fairing' });
-    }
-    if (compiled.geometry.legs.length > 0) {
-      this.stagingEntries.push({ kind: 'deploy', effect: 'legs', afterStage: -1, label: 'Deploy landing legs' });
-    }
-    if (compiled.geometry.chutes.length > 0) {
-      this.stagingEntries.push({ kind: 'deploy', effect: 'chutes', afterStage: -1, label: 'Deploy parachute' });
-    }
-
+    this.stagingEntries = buildStagingEntries(compiled);
     this.geomLength = compiled.geometry.length;
+    // Vessel 0 is the launched craft; the bundle shares its object
+    // references with the singular working-set fields.
+    this.vessels.push({
+      name: craft.name,
+      sim: this.sim,
+      compiled,
+      instances: this.instances,
+      geomLength: this.geomLength,
+      trail: this.trail,
+      lastTrailT: -1,
+      seenEvents: 0,
+      ap: this.ap,
+      autopilotOn: this.autopilotOn,
+      landAp: this.landAp,
+      autoLand: false,
+      manualPitch: this.manualPitch,
+      stagingEntries: this.stagingEntries,
+      consumedEntries: this.consumedEntries,
+    });
     this.camera.minDist = 8;
     this.camera.maxDist = 6e7;
     // Open framing the whole vehicle, whatever its size.
@@ -250,6 +254,7 @@ export class Flight3D {
     const rows: [string, string][] = [
       ['met', 'MET'],
       ['phase', 'Phase'],
+      ...(this.compiled.released ? ([['vessel', 'Vessel']] as [string, string][]) : []),
       ['refbody', 'Ref body'],
       ['alt', 'Altitude'],
       ['air', 'Airspeed'],
@@ -422,6 +427,100 @@ export class Flight3D {
     this.launchBtn.disabled = true;
   }
 
+  // ---------- vessels (air launch) ----------
+
+  /** Park the active vessel's working set back into its bundle. */
+  private syncActive(): void {
+    const v = this.vessels[this.activeIndex]!;
+    v.sim = this.sim;
+    v.compiled = this.compiled;
+    v.instances = this.instances;
+    v.geomLength = this.geomLength;
+    v.trail = this.trail;
+    v.seenEvents = this.seenEvents;
+    v.ap = this.ap;
+    v.autopilotOn = this.autopilotOn;
+    v.landAp = this.landAp;
+    v.autoLand = this.autoLand;
+    v.manualPitch = this.manualPitch;
+    v.stagingEntries = this.stagingEntries;
+    v.consumedEntries = this.consumedEntries;
+  }
+
+  /** Switch control/camera/HUD to vessel i (crashed ones stay viewable). */
+  switchVessel(i: number): void {
+    const n = this.vessels.length;
+    if (n < 2) return;
+    this.syncActive();
+    this.activeIndex = ((i % n) + n) % n;
+    const v = this.vessels[this.activeIndex]!;
+    this.sim = v.sim;
+    this.compiled = v.compiled;
+    this.instances = v.instances;
+    this.geomLength = v.geomLength;
+    this.trail = v.trail;
+    this.seenEvents = v.seenEvents;
+    this.ap = v.ap;
+    this.autopilotOn = v.autopilotOn;
+    this.landAp = v.landAp;
+    this.autoLand = v.autoLand;
+    this.manualPitch = v.manualPitch;
+    this.stagingEntries = v.stagingEntries;
+    this.consumedEntries = v.consumedEntries;
+    this.apBtn.textContent = `Autopilot: ${this.autopilotOn ? 'on' : 'off'}`;
+    this.streaks.length = 0; // re-seed the motion cues around the new vessel
+    this.landingPanelShown = false;
+  }
+
+  /**
+   * The release: the carrier stages (its sepMass IS the payload's wet
+   * mass), the payload spawns as a live vessel seeded at the carrier's
+   * state with a small momentum-conserving push-off pair, and control
+   * follows the payload — that's the mission. The carrier keeps flying
+   * on attitude-hold; switch back with [ or ].
+   */
+  private releaseVessel(): void {
+    const s = this.sim;
+    const rel = this.compiled.released?.find((r) => r.sectionBurnIndex === s.stageIndex);
+    if (!rel) {
+      s.stage();
+      return;
+    }
+    const mSub = massFromStage(rel.sub.vehicle, 0);
+    s.stage();
+    const rHat = scale(s.state.r, 1 / norm(s.state.r));
+    const push = 0.5; // m/s of clean drop separation
+    const seed = {
+      r: add(s.state.r, scale(rHat, -4)),
+      v: add(s.state.v, scale(rHat, -push)),
+      theta: s.state.theta,
+      omega: 0,
+      t: s.state.t,
+    };
+    s.state.v = add(s.state.v, scale(rHat, (push * mSub) / s.state.m));
+    const sim2 = new Sim(rel.sub.vehicle, s.body, undefined, seed);
+    sim2.attitude = { mode: 'pitch', angle: this.manualPitch }; // hold the drop attitude
+    this.vessels.push({
+      name: rel.name,
+      sim: sim2,
+      compiled: rel.sub,
+      instances: buildInstances(rel.sub, rel.subCraft),
+      geomLength: rel.sub.geometry.length,
+      trail: [],
+      lastTrailT: -1,
+      seenEvents: 0,
+      // A fresh ascent AP is available but OFF — it assumes a pad start.
+      ap: new Autopilot(defaultPlan(this.targetAltitude, sim2.body)),
+      autopilotOn: false,
+      landAp: new LandingAutopilot(),
+      autoLand: false,
+      manualPitch: this.manualPitch,
+      stagingEntries: buildStagingEntries(rel.sub),
+      consumedEntries: new Set(),
+    });
+    this.switchVessel(this.vessels.length - 1);
+  }
+
   /** Stages burning in the current phase (parallel staging: a strap-on
    * phase includes the sustainer and any further strap-on rings). */
   private currentPhaseMembers(): number[] {
@@ -441,7 +540,7 @@ export class Flight3D {
     for (let i = 0; i < this.stagingEntries.length; i++) {
       if (this.consumedEntries.has(i)) continue;
       const e = this.stagingEntries[i]!;
-      if (e.kind === 'sep' && this.sim.stageIndex > e.afterStage) continue;
+      if ((e.kind === 'sep' || e.kind === 'release') && this.sim.stageIndex > e.afterStage) continue;
       if (e.kind === 'deploy' && this.sim.deployDone(e.effect!)) continue;
       if (e.kind === 'nozzle' && this.sim.nozzleDeployed.has(e.afterStage)) continue;
       return i;
@@ -465,6 +564,7 @@ export class Flight3D {
     }
     this.consumedEntries.add(i);
     if (e.kind === 'sep') this.sim.stage();
+    else if (e.kind === 'release') this.releaseVessel();
     else this.sim.deploy(e.effect!);
   }
 
@@ -515,6 +615,8 @@ export class Flight3D {
     else if (e.key === ',') this.setWarp(this.warpIndex - 1);
     else if (e.key === 'a') this.toggleAutopilot();
     else if (e.key === 'g') this.sim.deploy(this.compiled.vehicle.gear ? 'gear' : 'legs');
+    else if (e.key === '[') this.switchVessel(this.activeIndex - 1);
+    else if (e.key === ']') this.switchVessel(this.activeIndex + 1);
     else if (e.key === 'p') this.sim.deployChutes();
     else if (e.key === 't') this.sim.rcsSettle = !this.sim.rcsSettle;
     else if (e.key === 'u') this.sim.fireUllageMotor();
@@ -543,22 +645,39 @@ export class Flight3D {
     const s = this.sim;
     const atmTop = s.body.atmosphere?.topAltitude ?? 0;
 
-    if (this.running && !s.crashed) {
+    if (this.running) {
+      // Make sure the active bundle aliases the live working set before
+      // stepping through the array (vessels[active].sim === this.sim).
+      this.syncActive();
       let toAdvance = wallDt * WARP_STEPS[this.warpIndex]!;
       let ticks = 0;
       while (toAdvance > 1e-9 && ticks < 2000) {
-        if (this.autopilotOn) this.ap.update(s);
-        else if (this.autoLand) this.landAp.update(s);
-        const coasting = !s.burning && s.actualThrottle < 0.01 && s.altitude > atmTop;
-        const dt = Math.min(toAdvance, coasting ? Math.max(1, toAdvance / 4) : 0.25);
-        s.step(dt);
+        if (!s.crashed) {
+          if (this.autopilotOn) this.ap.update(s);
+          else if (this.autoLand) this.landAp.update(s);
+        }
+        // Warp is global: the shared per-tick dt is the strictest regime
+        // clamp over EVERY vessel (the coasting fast-path only when all
+        // coast). Step order is the fixed array order — deterministic.
+        let coastingAll = true;
+        for (const v of this.vessels) {
+          const vs = v.sim;
+          if (vs.crashed) continue;
+          const top = vs.body.atmosphere?.topAltitude ?? 0;
+          if (!(!vs.burning && vs.actualThrottle < 0.01 && vs.altitude > top)) coastingAll = false;
+        }
+        const dt = Math.min(toAdvance, coastingAll ? Math.max(1, toAdvance / 4) : 0.25);
+        for (const v of this.vessels) {
+          if (v.sim.crashed) continue;
+          v.sim.step(dt);
+          if (v.sim.state.t - v.lastTrailT > 0.5) {
+            v.lastTrailT = v.sim.state.t;
+            v.trail.push({ x: v.sim.state.r.x, y: v.sim.state.r.y, t: v.sim.state.t });
+            if (v.trail.length > 4000) v.trail.splice(0, 1000);
+          }
+        }
         toAdvance -= dt;
         ticks++;
-        if (s.state.t - this.lastTrailT > 0.5) {
-          this.lastTrailT = s.state.t;
-          this.trail.push({ x: s.state.r.x, y: s.state.r.y, t: s.state.t });
-          if (this.trail.length > 4000) this.trail.splice(0, 1000);
-        }
       }
     }
 
@@ -629,9 +748,20 @@ export class Flight3D {
   }
 
   private pumpEvents(): void {
-    const evs = this.sim.events;
-    for (; this.seenEvents < evs.length; this.seenEvents++) {
-      const ev = evs[this.seenEvents]!;
+    // Every vessel's events reach the feed; background lines carry the
+    // vessel's name so a "[Carrier] Landed" is legible mid-mission.
+    this.syncActive();
+    this.vessels.forEach((v, i) => {
+      v.seenEvents = this.pumpVesselEvents(v, i === this.activeIndex ? '' : `[${v.name}] `);
+    });
+    this.seenEvents = this.vessels[this.activeIndex]!.seenEvents;
+  }
+
+  private pumpVesselEvents(v: Vessel, prefix: string): number {
+    const evs = v.sim.events;
+    let seen = v.seenEvents;
+    for (; seen < evs.length; seen++) {
+      const ev = evs[seen]!;
       let text = '';
       switch (ev.type) {
         case 'liftoff':
@@ -690,7 +820,7 @@ export class Flight3D {
           // giving the historical body-relative path.
           const child = to.parent === ev.from ? to : bodyById(ev.from);
           const sign = to.parent === ev.from ? -1 : 1;
-          for (const p of this.trail) {
+          for (const p of v.trail) {
             const eph = bodyOrbitState(child, p.t);
             p.x += sign * eph.r.x;
             p.y += sign * eph.r.y;
@@ -698,11 +828,13 @@ export class Flight3D {
           break;
         }
       }
+      if (!text) continue; // events without feed copy (gear/legs handled by rows)
       const div = document.createElement('div');
-      div.textContent = `T+${fmtTime(ev.t)}  ${text}`;
+      div.textContent = `T+${fmtTime(ev.t)}  ${prefix}${text}`;
       this.feed.prepend(div);
       while (this.feed.children.length > 5) this.feed.lastChild?.remove();
     }
+    return seen;
   }
 
   // ---------- rendering ----------
@@ -972,6 +1104,43 @@ export class Flight3D {
       this.renderer.draw('canopy', multiply(att, canopyLocal), [0.9, 0.45, 0.2], 0.92);
     }
 
+    // Background vessels: parts, a simple plume, and their own trails.
+    // Each is anchored to its OWN world position — the float64 rule:
+    // never draw one vessel's near-field geometry relative to another's
+    // origin. Streaks/arrows/impact markers stay active-only.
+    this.vessels.forEach((v, vi) => {
+      if (vi === this.activeIndex) return;
+      const bs = v.sim;
+      if (bs.body.id !== s.body.id) return; // cross-frame fallback: skip drawing
+      const w = this.toWorld(bs.state.r.x, bs.state.r.y);
+      const yC = bs.massProps.yCoM;
+      const attB = multiply(translation(w.x, w.y, w.z), rotationZ(-bs.state.theta));
+      for (const inst of v.instances) {
+        if (inst.burnIndex < bs.stageIndex || bs.torn.has(inst.partId)) continue;
+        let local = multiply(translation(inst.x, inst.y - yC, inst.z), rotationY(-inst.angle));
+        if (inst.hScale !== 1) local = multiply(local, scalingXYZ(1, inst.hScale, 1));
+        this.renderer.draw(inst.defId, multiply(attB, local), inst.color);
+        if (inst.engine && inst.burnIndex === bs.stageIndex && bs.actualThrottle > 0.02 && !bs.crashed) {
+          const plumeLocal = multiply(
+            translation(inst.x, inst.y - yC, inst.z),
+            scalingXYZ(inst.exitRadius, inst.exitRadius * 8 * bs.actualThrottle, inst.exitRadius),
+          );
+          this.renderer.draw('plume', multiply(attB, plumeLocal), [1.0, 0.72, 0.35], 0.6, true);
+        }
+      }
+      if (v.trail.length > 1) {
+        const pts = new Float32Array(v.trail.length * 3);
+        for (let k = 0; k < v.trail.length; k++) {
+          const wpt = this.toWorld(v.trail[k]!.x, v.trail[k]!.y);
+          pts[k * 3] = wpt.x - w.x;
+          pts[k * 3 + 1] = wpt.y - w.y;
+          pts[k * 3 + 2] = wpt.z - w.z;
+        }
+        this.renderer.updateLines(`trail-v${vi}`, pts);
+        this.renderer.draw(`trail-v${vi}`, translation(w.x, w.y, w.z), [0.7, 0.58, 0.42], 0.5, true);
+      }
+    });
+
     // Steering indicators: commanded attitude (cyan) and airspeed (green).
     if (this.running && !s.landed && !s.crashed) {
       const L = this.geomLength * 1.1;
@@ -1085,7 +1254,10 @@ export class Flight3D {
   // ---------- HUD ----------
 
   private set(key: string, text: string, cls = ''): void {
-    const el = this.hudValues.get(key)!;
+    // Rows are built per-craft (plane rows, vessel row) — a vessel switch
+    // can land on a HUD without this key; skip rather than throw.
+    const el = this.hudValues.get(key);
+    if (!el) return;
     el.textContent = text;
     el.className = `value ${cls}`;
   }
@@ -1097,6 +1269,11 @@ export class Flight3D {
     const stage = s.vehicle.stages[s.stageIndex];
     this.set('met', `T+ ${fmtTime(s.state.t)}`);
     this.set('phase', s.crashed ? 'LOST' : this.autopilotOn ? this.ap.phase : 'manual');
+    if (this.vessels.length > 1) {
+      this.set('vessel', `${this.activeIndex + 1}/${this.vessels.length} ${this.vessels[this.activeIndex]!.name} ([ ])`);
+    } else {
+      this.set('vessel', this.vessels[0]?.name ?? '—');
+    }
     this.set('refbody', s.body.name, s.body.id === 'earth' ? '' : 'good');
     this.set('alt', fmtDistance(s.altitude));
     this.set('air', fmtSpeed(norm(s.airspeedVec)));
@@ -1260,6 +1437,71 @@ export class Flight3D {
   }
 }
 
+
+/** Flatten a compiled craft into renderable part instances. */
+function buildInstances(compiled: Compiled, craft: Craft): PartInstance[] {
+  const burnIndex = new Map<string, number>();
+  compiled.stages.forEach((cs, i) => cs.partIds.forEach((id) => burnIndex.set(id, i)));
+  const out: PartInstance[] = [];
+  for (const [id, pl] of placements(craft)) {
+    for (const inst of pl.instances) {
+      out.push({
+        partId: id,
+        defId: pl.def.id,
+        isFin: !!pl.def.fin,
+        isLeg: pl.def.kind === 'leg',
+        height: pl.height,
+        hScale: pl.height / pl.def.height,
+        burnIndex: burnIndex.get(id) ?? 0,
+        x: inst.x,
+        y: inst.y,
+        z: inst.z,
+        angle: inst.angle,
+        color: pl.def.color,
+        engine: pl.def.kind === 'engine',
+        exitRadius: pl.def.radiusBottom,
+        pExit: plumeExitPressure(pl.def),
+      });
+    }
+  }
+  return out;
+}
+
+/** Staging sequence: separations in burn order with deploy states
+ * interleaved (fairing after the first separation, nozzle extensions
+ * when their stage becomes active), then terminal-descent deployables.
+ * A released section's entry is a RELEASE — it spawns a vessel. */
+function buildStagingEntries(compiled: Compiled): StagingEntry[] {
+  const entries: StagingEntry[] = [];
+  const vStages = compiled.vehicle.stages;
+  const hasNozzle = (k: number): boolean => !!vStages[k]?.engines.some((g) => g.engine.nozzleExtension);
+  const hasFairings = (compiled.geometry.fairings?.length ?? 0) > 0;
+  if (hasNozzle(0)) entries.push({ kind: 'nozzle', afterStage: 0, label: 'Extend nozzle' });
+  for (let i = 0; i + 1 < vStages.length; i++) {
+    const rel = compiled.released?.find((r) => r.sectionBurnIndex === i);
+    entries.push(
+      rel
+        ? { kind: 'release', afterStage: i, label: `Release ${rel.name}` }
+        : { kind: 'sep', afterStage: i, label: `Separate stage ${i + 1}` },
+    );
+    if (i === 0 && hasFairings) {
+      entries.push({ kind: 'deploy', effect: 'fairing', afterStage: -1, label: 'Jettison fairing' });
+    }
+    if (hasNozzle(i + 1)) {
+      entries.push({ kind: 'nozzle', afterStage: i + 1, label: 'Extend nozzle' });
+    }
+  }
+  if (vStages.length === 1 && hasFairings) {
+    entries.push({ kind: 'deploy', effect: 'fairing', afterStage: -1, label: 'Jettison fairing' });
+  }
+  if (compiled.geometry.legs.length > 0) {
+    entries.push({ kind: 'deploy', effect: 'legs', afterStage: -1, label: 'Deploy landing legs' });
+  }
+  if (compiled.geometry.chutes.length > 0) {
+    entries.push({ kind: 'deploy', effect: 'chutes', afterStage: -1, label: 'Deploy parachute' });
+  }
+  return entries;
+}
 
 /** Nozzle exit-pressure proxy for plume visuals: vacuum bells sit near
  * their separation limit × 0.4 (the Summerfield relation inverted);
