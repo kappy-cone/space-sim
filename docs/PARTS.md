@@ -60,6 +60,33 @@ wins on a rocket.
 | Chutes (main/drogue) | Atmospheric recovery: drogue survives 12 kPa, main needs < 2.5 kPa |
 | Probe/Capsule/Station | Payloads (player cargo) with built-in RCS classes |
 
+## Satellite function modules (the world layer)
+
+Satellites are designed payloads, not a vehicle class: one module +
+existing tanks/engines/RCS. Three functions, three orbit regimes, three
+launch vehicles — that branching is the point (see docs/WORLD.md).
+
+| Module | Wins when | Demands |
+|---|---|---|
+| Relay (150 kg) | Extending the ground network past the one Cape dish | HIGH orbit: ring altitude ≥ ~1,400 km (6-sat coverage) or the 35,786 km synchronous hover — restartable upper stage, ignition budget |
+| Survey (250 kg) | Unmapped terrain blocks site discovery | LOW orbit under the 900 km imaging ceiling, retrograde demand direction (SSO analogue) → the west corridor, no rotation bonus |
+| Tug (300 kg) | Debris crowding the bands (the congestion bars) | The TARGET's orbit: storables, deep throttle, many ignitions, rendezvous margin; grapple inside 250 m / 5 m/s |
+
+Station-keeping life = residual propellant at deploy (Isp 300 s class)
+— tank sizing IS the lifetime decision; there is no timer.
+
+## Suppliers (fiction over unchanged data)
+
+The non-domination table expressed as manufacturers, so the tradeoff
+structure reads as house philosophy. No part number moves.
+
+| House | Philosophy | Catalog |
+|---|---|---|
+| Karman & Voss Ordnance | Military-heritage storables & solids: lights every time, restarts forever, stores for years; Isp is the price | AJ10, GEM-40/RSRM, ullage motors, hypergolic tanks, RCS quads |
+| Boreal Hydrogenics | The hydrogen house: nothing touches the Isp; boiloff, bulk and fragile handling come with it | RL10B-2, RS-25, J-2, hydrolox tanks |
+| Meridian Kerolox Works | Cheap dense kerolox/methalox by the pallet: the workhorse middle of every tradeoff | Merlins, RD-180, Rutherford, Raptor, kerolox/methalox tanks |
+| Consolidated Turbine & Airframe | Air-breathers and the wings they push: 20× the Isp inside the envelope, zero outside it | CFM56, J79, RJ43, jet-fuel tanks, wings, gear |
+
 ## Plane class (✈)
 
 The class ships with the 20× headline: a turbofan's fuel-only Isp

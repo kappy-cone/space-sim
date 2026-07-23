@@ -14,6 +14,18 @@ spawns the payload as a second live vessel — `[`/`]` switches control,
 the carrier keeps flying. The ramjet dart has no runway starter on
 purpose: its real testbed, the X-7, was air-dropped.
 
+And now the world accumulates: a **committed** flight is an entry in a
+program — whatever you leave on orbit persists in a registry (satellites,
+your upper stages, the debris you staged through the corridor), decays
+if its perigee dips into the atmosphere, and shows up in the sky on the
+next flight. One ground station to start; a vessel out of line-of-sight
+loses manual control, so relay constellations are something you launch,
+not something you get. Survey satellites reveal terrain, revealed
+terrain exposes launch sites, landing a cargo plane there activates
+them, and range corridors decide which pad your vehicle is even legal
+at. Test flights write nothing — iteration stays free. See
+`docs/WORLD.md` for the whole model and its governing-rule table.
+
 ## Run
 
 ```bash
