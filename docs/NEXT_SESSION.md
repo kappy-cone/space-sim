@@ -111,6 +111,21 @@ shrinks), `space-sim.craft.undo` (persisted undo tail), `space-sim.hangar`.
 6. **Ullage / propellant settling for relights** (flagged estimates), if
    engine realism continues.
 
+## Full moon mission (flown live, 2026-07-23)
+
+A complete mission was flown end-to-end in the browser: 4-stage vehicle
+(9×Merlin / MVac / RL10 / single-Rutherford legged lander, 17.3 km/s),
+autopilot ascent, phase-angle-timed TLI, SOI handoff, mid-course trim,
+stage jettison, and a two-burn autoland to a 3.7 m/s lunar touchdown
+with 118 kg of propellant and one ignition to spare. The first attempt
+exposed the orbital-arrival landing bug (fixed, regression-tested in
+landing.test.ts — see that commit). Mission-driving learnings:
+- Phasing/TLI timing was done with an injected page script; a proper
+  in-game transfer planner is the top backlog item.
+- Stacking parts below a clustered engine duplicates the subtree per
+  cluster instance (instanceCount semantics) — 2× engines on the lander
+  silently doubled everything below it in the VAB. Consider a warning.
+
 ## Known rough edges
 
 - **Staging reorder UI** allows physically silly orders (by design — the
@@ -123,6 +138,14 @@ shrinks), `space-sim.craft.undo` (persisted undo tail), `space-sim.hangar`.
   the denial event names it.
 - **The stability test rocket needs 8 large fins** — real physics (low
   full-load CoM from settled propellant), see compile.test.ts comments.
+- **Camera vertical is world-fixed**: after flying around a body the
+  local horizon renders diagonal (e.g. landed on the moon). Align the
+  orbit camera's up-reference to local vertical.
+- **Auto-land button label** doesn't refresh when the flag is toggled
+  programmatically (debug-hook path only).
+- **Trim-burn blip**: a controller that lights the engine and re-checks
+  its cutoff on the next tick can burn one ignition for a 0.1 s blip —
+  in-game maneuver tooling should check before lighting.
 - **Phantom-input corruption** was seen ONLY under remote browser
   automation (this session: an in-app-browser scroll synthesized a page
   key that launched the rocket). Never reproduced with real input; the
