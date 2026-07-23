@@ -25,7 +25,9 @@ export type PartKind =
   | 'fin'
   | 'leg'
   | 'chute'
-  | 'control';
+  | 'control'
+  | 'wing'
+  | 'gear';
 
 /** Trapezoidal fin planform [m]: root chord, tip chord, span, leading-edge
  * sweep (root LE → tip LE, toward the tail), plate thickness. */
@@ -53,6 +55,9 @@ export interface WingShape {
   clMax: number;
   cd0: number;
   controlFraction?: number;
+  /** Wet wing: usable fuel cavity [m³] (the structure IS the tank —
+   * Concorde practice). Needs `fluid` on the part. */
+  tankVolume?: number;
 }
 
 /** Generic deploy state: one mechanism for fairings, nozzle extensions,
@@ -63,7 +68,7 @@ export interface DeployDef {
   reversible: boolean;
   /** Mass change on deploy [kg] (jettisoned fairing shells: −dryMass). */
   massDelta: number;
-  effect: 'nozzle' | 'fairing' | 'legs' | 'chutes';
+  effect: 'nozzle' | 'fairing' | 'legs' | 'chutes' | 'gear';
 }
 
 export interface ControlDef {
@@ -132,6 +137,17 @@ export interface PartDef {
   leg?: { reach: number };
   /** Parachute: deployed drag area Cd·A [m²] and safe-deploy q [Pa]. */
   chute?: { cdA: number; safeQ: number };
+  /** Landing gear: wheel brakes, gear-DOWN dynamic-pressure limit [Pa]
+   * (chute-safeQ pattern — exceeding it tears the gear), and deployed
+   * drag area Cd·A [m²]. Retractable gear also carries a DeployDef. */
+  gear?: { brakes: boolean; maxQ: number; dragCdA: number };
+  /** Structural Mach limit — the scalar stand-in for aerothermal and
+   * flutter limits (deliberately NOT a thermal subsystem). Checked only
+   * at meaningful dynamic pressure. */
+  maxMach?: number;
+  /** Per-part structural q limit override [Pa] (wings carry their own;
+   * other kinds default by class in compile). */
+  maxQ?: number;
   /** Hidden from the palette (legacy aliases kept for saved crafts). */
   hidden?: boolean;
 }
@@ -585,6 +601,81 @@ export const PARTS: readonly PartDef[] = [
   finDef('fin-m', 'Fin M', { cr: 1.6, ct: 0.8, span: 1.1, sweep: 0.6, thickness: 0.02 }),
   finDef('fin-l', 'Fin L', { cr: 2.6, ct: 1.3, span: 1.7, sweep: 1.0, thickness: 0.03 }),
   gridFinDef(),
+  // ---- wings (plane class): three regimes, one tailplane. A wing part
+  // is the whole PAIR (planar 3-DOF); span is full tip-to-tip. ----
+  wingDef('wing-sail', 'Sailplane Wing', {
+    // ASK-21 analogue: 17 m span, 17.95 m² → AR 16.1 (Alexander
+    // Schleicher published data); trapezoid equivalent chords.
+    cr: 1.3, ct: 0.81, span: 17.0, sweep: 0,
+    incidence: 2 * (Math.PI / 180), // typical wing setting (Raymer §4.5)
+    e: 0.85, // clean high-AR planform (Raymer §12.5 class value)
+    clMax: 1.4, cd0: 0.007,
+  }, 180, 0.5, 'ASK-21 planform (Schleicher data); composite pair mass ~180 kg ESTIMATE; maxMach 0.5/low q ceiling: sailplane VNE class', 4_000),
+  wingDef('wing-swept', 'Transport Swept Wing', {
+    // 737-800: span 34.32 m, S 124.6 m², AR 9.45, quarter-chord sweep
+    // 25° → root-LE→tip-LE offset ≈ 8 m (Boeing published planform).
+    cr: 5.4, ct: 1.86, span: 34.32, sweep: 8.0,
+    incidence: 2 * (Math.PI / 180),
+    e: 0.8, // Raymer §12.5 swept transport class
+    clMax: 1.4, cd0: 0.008,
+  }, 10_800, 0.9, '737-800 planform (Boeing); wing-box pair mass ~10.8 t ESTIMATE from OEW breakdowns; MMO-class Mach limit', 19_000),
+  wingDef('wing-delta', 'Delta Wing (wet)', {
+    // Concorde: span 25.6 m, S 358.25 m² → AR 1.83 (published); ogival
+    // delta as trapezoid cr 27.7/ct 0.3, LE offset ≈ 22 m. Slender-delta
+    // Oswald e 0.55 ESTIMATE; clMax 1.1 is the attached-flow value —
+    // vortex lift is NOT modeled (flagged). Elevons: the delta trims
+    // itself (Concorde had no tailplane). Wet wing: ~75 m³ usable fuel
+    // cavity (Concorde wing-tank class, ESTIMATE) — the internal-volume
+    // win that makes the delta worth its induced-drag cost.
+    cr: 27.7, ct: 0.3, span: 25.6, sweep: 22.0,
+    incidence: 1 * (Math.PI / 180),
+    e: 0.55, clMax: 1.1, cd0: 0.006,
+    controlFraction: 0.25, // elevons (Concorde practice)
+    tankVolume: 75,
+  }, 22_000, 2.2, 'Concorde planform + M2.2 envelope (published); mass/e/clMax/tank volume ESTIMATES flagged inline', 40_000, 'jetfuel'),
+  wingDef('tailplane', 'Tailplane + Elevator', {
+    // 737 horizontal stabilizer class: S 32.8 m², span 14.35 m, AR 6.27;
+    // 30° sweep → LE offset ≈ 4.1 m; elevator ≈ 30% chord.
+    cr: 3.2, ct: 1.37, span: 14.35, sweep: 4.1,
+    incidence: -2 * (Math.PI / 180), // download trim setting (Raymer §4.5)
+    e: 0.7, // ESTIMATE (tail in wing wake)
+    clMax: 1.2, cd0: 0.008,
+    controlFraction: 0.3,
+  }, 700, 0.9, '737 stabilizer planform class (published); pair mass ~700 kg ESTIMATE; elevator fraction estimate', 19_000),
+  // ---- jet engines (plane class; roster physics in physics/parts.ts) ----
+  jetDef('e-cfm56', 'CFM56 Turbofan', 'cfm56', [fru(1.1, 0.95, 2.6), cyl(0.5, 0.8, 2.6)], 2_380, 'Roster: CFM/EASA TCDS (see physics/parts.ts); nacelle geometry approximate'),
+  jetDef('e-j79', 'J79 Turbojet (A/B)', 'j79', [cyl(0.53, 5.3)], 1_745, 'Roster: GE/USAF (see physics/parts.ts); geometry approximate'),
+  jetDef('e-rj43', 'RJ43 Ramjet', 'rj43', [fru(0.45, 0.35, 0.6), cyl(0.35, 2.4, 0.6)], 300, 'Roster: Marquardt Bomarc/X-7 (see physics/parts.ts); geometry approximate'),
+  // ---- landing gear (plane class) ----
+  def({
+    id: 'gear-fixed',
+    name: 'Fixed Gear',
+    kind: 'gear',
+    segments: [cyl(0.09, 0.9)],
+    color: [0.35, 0.37, 0.42],
+    dryMass: 60,
+    source: 'GA fixed tricycle class (Cessna 172 gear ~55 kg) — ESTIMATE; always-exposed drag is the price of the simplicity',
+    gear: { brakes: true, maxQ: 8_000, dragCdA: 0.15 },
+    stackTop: false,
+    stackBottom: false,
+    radialParent: false,
+    radialChild: true,
+  }),
+  def({
+    id: 'gear-retract',
+    name: 'Retractable Gear',
+    kind: 'gear',
+    segments: [cyl(0.16, 1.3)],
+    color: [0.32, 0.34, 0.4],
+    dryMass: 2_700,
+    source: '737-800 tricycle gear ~2.7 t (type OEW breakdowns, ESTIMATE); gear-down limit ≈ 270 KIAS placard → ~12 kPa',
+    gear: { brakes: true, maxQ: 12_000, dragCdA: 0.8 },
+    deploy: { label: 'Landing gear', reversible: true, massDelta: 0, effect: 'gear' },
+    stackTop: false,
+    stackBottom: false,
+    radialParent: false,
+    radialChild: true,
+  }),
 ];
 
 function gridFinDef(): PartDef {
@@ -596,6 +687,56 @@ function gridFinDef(): PartDef {
     control: { finControl: true },
     color: [0.45, 0.42, 0.38],
   };
+}
+
+/** Wing part: chord runs down the stack axis from the part top (fin
+ * convention); rendered as a spanwise plate. Wings mount flush on the
+ * fuselage side at the mirror azimuth (±90° — the pair convention).
+ * The structural maxQ is how a wing "loses outside its band". */
+function wingDef(
+  id: string,
+  name: string,
+  wing: WingShape,
+  pairMass: number,
+  maxMach: number,
+  source: string,
+  maxQ: number,
+  fluid?: PropellantId,
+): PartDef {
+  return def({
+    id,
+    name,
+    kind: 'wing',
+    segments: [cyl(0.22, wing.cr)],
+    color: [0.68, 0.72, 0.78],
+    dryMass: pairMass,
+    source,
+    fluid,
+    stackTop: false,
+    stackBottom: false,
+    radialParent: false,
+    radialChild: true,
+    wing,
+    maxMach,
+    maxQ,
+  });
+}
+
+function jetDef(id: string, name: string, engineId: string, segments: Segment[], dryMass: number, source: string): PartDef {
+  return def({
+    id,
+    name,
+    kind: 'engine',
+    segments,
+    color: [0.55, 0.57, 0.62],
+    dryMass,
+    engineId,
+    source,
+    stackTop: true,
+    stackBottom: true,
+    radialParent: false,
+    radialChild: true, // pod-mount on a fuselage or wing side
+  });
 }
 
 function finDef(id: string, name: string, fin: FinShape): PartDef {

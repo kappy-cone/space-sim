@@ -207,6 +207,20 @@ export function compile(craft: Craft): Compiled {
         source: def.source,
       });
       sec.tankProp.set(def.fluid, (sec.tankProp.get(def.fluid) ?? 0) + prop * n);
+    } else if (def.wing?.tankVolume && def.fluid) {
+      // Wet wing: the wing structure IS the tank (Concorde practice) —
+      // dry mass is the wing's own, propellant from the declared cavity.
+      const prop = def.wing.tankVolume * TANK_FILL * propellantById(def.fluid).bulkDensity * n;
+      sec.stage.tanks.push({
+        id: def.id,
+        name: def.name,
+        fluid: def.fluid,
+        volume: def.wing.tankVolume * n,
+        propellantMass: prop,
+        dryMass: def.dryMass * n,
+        source: def.source,
+      });
+      sec.tankProp.set(def.fluid, (sec.tankProp.get(def.fluid) ?? 0) + prop);
     } else {
       sec.stage.extraDryMass = (sec.stage.extraDryMass ?? 0) + def.dryMass * n;
     }
@@ -456,6 +470,14 @@ export function compile(craft: Craft): Compiled {
         dryMass += propMass; // never drains
         propMass = 0;
       }
+    } else if (def.wing?.tankVolume && def.fluid) {
+      // Wet wing: same dead-fluid rule as tanks.
+      const sec = sections[section.get(id)!]!;
+      propMass = def.wing.tankVolume * TANK_FILL * propellantById(def.fluid).bulkDensity * n;
+      if (sec.fluid !== null && sec.fluid !== def.fluid && sec.stage.engines.some((g) => g.engine.propellant !== 'solid')) {
+        dryMass += propMass;
+        propMass = 0;
+      }
     }
 
     geomParts.push({
@@ -470,7 +492,11 @@ export function compile(craft: Craft): Compiled {
       propellant: propMass,
       cnAlpha: cn,
       yCp: cn !== 0 ? cnY / cn : 0,
-      maxQ: def.kind === 'fin' ? MAX_Q_FIN : def.kind === 'nose' ? MAX_Q_NOSE : MAX_Q_HULL,
+      maxQ: def.maxQ ?? (def.kind === 'fin' ? MAX_Q_FIN : def.kind === 'nose' ? MAX_Q_NOSE : MAX_Q_HULL),
+      maxMach: def.maxMach,
+      // Wings are NOT shedable: losing the wing is losing the aircraft,
+      // and a torn part would keep lifting through the static surface
+      // list. Over-limit on a wing = breakup, named.
       shedable: def.kind === 'fin' || def.kind === 'nose',
     });
   }
@@ -512,6 +538,20 @@ export function compile(craft: Craft): Compiled {
     areaFaired: compiled.map((_s, i) => dragFor(i, true).area),
     areaBare: compiled.map((_s, i) => dragFor(i, false).area),
   };
+
+  // ---- landing gear aggregate ----
+  let gear: Vehicle['gear'];
+  for (const p of Object.values(craft.parts)) {
+    const def = partById(p.defId);
+    if (!def.gear) continue;
+    const n = instanceCount(craft, p.id);
+    if (!gear) gear = { retractable: true, brakes: false, dragCdA: 0, maxQ: Infinity };
+    // Fixed gear anywhere on the vehicle means gear is always down.
+    if (!def.deploy) gear.retractable = false;
+    gear.brakes = gear.brakes || def.gear.brakes;
+    gear.dragCdA += def.gear.dragCdA * n;
+    gear.maxQ = Math.min(gear.maxQ, def.gear.maxQ);
+  }
 
   // ---- plane-class lifting surfaces ----
   // The CLASS gates, not the parts: any 'plane' craft gets planeAero
@@ -606,6 +646,7 @@ export function compile(craft: Craft): Compiled {
     drag,
     ullageMotors,
     planeAero,
+    gear,
   };
 
   const reports = vehicle.stages.map((_s, i) => stageReport(vehicle, i));
@@ -684,7 +725,8 @@ export function compile(craft: Craft): Compiled {
   for (const p of Object.values(craft.parts)) {
     const def = partById(p.defId);
     const compact =
-      def.kind === 'fin' || def.kind === 'chute' || def.kind === 'leg' || def.kind === 'control' || !!def.fairing;
+      def.kind === 'fin' || def.kind === 'chute' || def.kind === 'leg' || def.kind === 'control' ||
+      def.kind === 'wing' || def.kind === 'gear' || !!def.fairing; // wings/gear ARE their pair
     if (p.attach.kind === 'radial' && p.symmetry === 1 && !compact) {
       warnings.push(`1× ${def.name} attached radially without symmetry — asymmetric.`);
     }

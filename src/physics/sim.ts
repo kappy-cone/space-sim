@@ -72,6 +72,8 @@ export type SimEvent =
   | { type: 'ignitionFailed'; t: number; stage: number; limit: number }
   | { type: 'flameout'; t: number; stage: number }
   | { type: 'jetFlameout'; t: number; stage: number; reason: string }
+  | { type: 'gearDeployed'; t: number }
+  | { type: 'gearRetracted'; t: number }
   | { type: 'engineDestroyed'; t: number; stage: number; reason: string }
   | { type: 'fairingJettisoned'; t: number }
   | { type: 'nozzleDeployed'; t: number; stage: number }
@@ -154,6 +156,10 @@ export class Sim {
   fairingsJettisoned = false;
   legsDeployed = false;
   chutesDeployed = false;
+  /** Landing gear state (plane class). Fixed gear is always down. */
+  gearDeployed = false;
+  /** Gear torn off by exceeding the gear-down q limit. */
+  gearFailed = false;
   q = 0;
   aoa = 0;
   mach = 0;
@@ -188,6 +194,9 @@ export class Sim {
     this.propellant = this.pools[0] ?? 0;
     this.rcsPropellant = vehicle.rcsPropellant ?? 0;
     this.ullageMotorsLeft = (vehicle as { ullageMotors?: number }).ullageMotors ?? 0;
+    // Fixed gear starts (and stays) down; retractable starts down on the
+    // ground (you don't spawn gear-up on the pad/runway).
+    this.gearDeployed = vehicle.gear !== undefined;
     this.pinToSurface(); // launch pad: equator, +x, nose up
   }
 
@@ -391,20 +400,32 @@ export class Sim {
 
   /** Generic deploy dispatcher — one entry point for every DeployDef
    * effect, so parts declare deployability and callers stop
-   * special-casing kinds. */
-  deploy(effect: 'legs' | 'chutes' | 'fairing' | 'nozzle'): void {
+   * special-casing kinds. Gear is the one REVERSIBLE effect: calling
+   * again retracts. */
+  deploy(effect: 'legs' | 'chutes' | 'fairing' | 'nozzle' | 'gear'): void {
     if (effect === 'legs') this.deployLegs();
     else if (effect === 'chutes') this.deployChutes();
     else if (effect === 'fairing') this.jettisonFairings();
+    else if (effect === 'gear') this.toggleGear();
     else this.deployNozzle();
   }
 
   /** Whether a one-shot deploy effect has already fired (staging-queue
    * satisfied check; nozzle is per-stage and checked separately). */
-  deployDone(effect: 'legs' | 'chutes' | 'fairing'): boolean {
+  deployDone(effect: 'legs' | 'chutes' | 'fairing' | 'gear'): boolean {
     if (effect === 'legs') return this.legsDeployed;
     if (effect === 'chutes') return this.chutesDeployed;
+    if (effect === 'gear') return this.gearDeployed;
     return this.fairingsJettisoned;
+  }
+
+  /** Cycle the landing gear (retractable only — fixed gear stays down). */
+  toggleGear(): void {
+    const g = this.vehicle.gear;
+    if (!g) return;
+    if (!g.retractable) return; // fixed gear: always down
+    this.gearDeployed = !this.gearDeployed;
+    this.events.push({ type: this.gearDeployed ? 'gearDeployed' : 'gearRetracted', t: this.state.t });
   }
 
   stage(): void {
@@ -1032,7 +1053,10 @@ export class Sim {
     const di = Math.min(this.stageIndex, (drag?.cdFaired.length ?? 1) - 1);
     const cdEff = drag ? (this.fairingsJettisoned ? drag.cdBare[di]! : drag.cdFaired[di]!) : this.vehicle.cd;
     const areaEff = drag ? (this.fairingsJettisoned ? drag.areaBare[di]! : drag.areaFaired[di]!) : this.vehicle.area;
-    const cdA0 = cdEff * areaEff;
+    // Deployed landing gear hangs in the airstream (+0 for everything
+    // else, exact in IEEE — rockets unaffected).
+    const gearDragCdA = this.gearDeployed && !this.gearFailed && this.vehicle.gear ? this.vehicle.gear.dragCdA : 0;
+    const cdA0 = cdEff * areaEff + gearDragCdA;
     const refA = this.geom.refArea;
     const rotRate = this.body.rotationRate;
     const mu = this.body.mu;
@@ -1267,17 +1291,35 @@ export class Sim {
     if (this.q === 0 || this.crashed) return;
     for (const p of this.geom.parts) {
       if (p.stage < this.stageIndex || this.torn.has(p.partId)) continue;
-      if (this.q > p.maxQ) {
+      // Over max Mach at meaningful q: the scalar aerothermal/flutter
+      // limit (rockets exceed any Mach number in near-vacuum harmlessly —
+      // there is no load or heating without air).
+      const overMach = p.maxMach !== undefined && this.mach > p.maxMach && this.q > 500;
+      if (this.q > p.maxQ || overMach) {
         if (p.shedable) {
           this.torn.add(p.partId);
           this.state.m -= p.dryMass;
-          this.events.push({ type: 'partTorn', t: this.state.t, partName: p.name });
+          this.events.push({
+            type: 'partTorn',
+            t: this.state.t,
+            partName: overMach ? `${p.name} (over Mach ${p.maxMach})` : p.name,
+          });
         } else {
           this.crashed = true;
           this.events.push({ type: 'breakup', t: this.state.t, q: this.q });
           return;
         }
       }
+    }
+    // Deployed gear over its gear-down limit tears off (chute pattern).
+    const g = this.vehicle.gear;
+    if (g && this.gearDeployed && !this.gearFailed && this.q > g.maxQ) {
+      this.gearFailed = true;
+      this.events.push({
+        type: 'partTorn',
+        t: this.state.t,
+        partName: `Landing gear (over the ${(g.maxQ / 1000).toFixed(0)} kPa gear-down limit)`,
+      });
     }
     // A deployed canopy tears if q climbs back over its envelope.
     if (this.chutesDeployed) {

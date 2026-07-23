@@ -146,6 +146,65 @@ describe('part catalog', () => {
     }
   });
 
+  it('wings: three flight regimes with ordered bands, all fields sane', () => {
+    const wings = PARTS.filter((p) => p.kind === 'wing');
+    expect(wings.length).toBe(4); // 3 wings + tailplane — no variant creep
+    for (const p of wings) {
+      const w = p.wing!;
+      const tag = p.id;
+      expect(w, tag).toBeDefined();
+      expect(w.e, tag).toBeGreaterThan(0.4);
+      expect(w.e, tag).toBeLessThanOrEqual(0.9);
+      expect(w.clMax, tag).toBeGreaterThanOrEqual(1.0);
+      expect(w.clMax, tag).toBeLessThanOrEqual(1.8);
+      expect(w.cd0, tag).toBeGreaterThan(0.003);
+      expect(w.cd0, tag).toBeLessThan(0.02);
+      expect(Math.abs(w.incidence), tag).toBeLessThan(0.09); // |≤ 5°|
+      expect(p.maxMach, tag).toBeDefined();
+      expect(p.maxQ, tag).toBeDefined();
+      if (w.controlFraction) {
+        expect(w.controlFraction, tag).toBeGreaterThan(0.1);
+        expect(w.controlFraction, tag).toBeLessThan(0.5);
+      }
+    }
+    const ar = (id: string): number => {
+      const w = partById(id).wing!;
+      return (w.span * w.span) / (((w.cr + w.ct) / 2) * w.span);
+    };
+    // The three regimes order strictly: AR falls as the speed band rises.
+    expect(ar('wing-sail')).toBeGreaterThan(ar('wing-swept'));
+    expect(ar('wing-swept')).toBeGreaterThan(ar('wing-delta'));
+    expect(partById('wing-sail').maxMach!).toBeLessThan(partById('wing-swept').maxMach!);
+    expect(partById('wing-swept').maxMach!).toBeLessThan(partById('wing-delta').maxMach!);
+    expect(partById('wing-sail').maxQ!).toBeLessThan(partById('wing-swept').maxQ!);
+    expect(partById('wing-swept').maxQ!).toBeLessThan(partById('wing-delta').maxQ!);
+    // The delta's volume win is real, and only the delta has it.
+    expect(partById('wing-delta').wing!.tankVolume).toBeGreaterThan(0);
+    expect(partById('wing-delta').fluid).toBe('jetfuel');
+  });
+
+  it('gear: fixed wins on mass, retractable wins on clean drag', () => {
+    const fixed = partById('gear-fixed');
+    const retract = partById('gear-retract');
+    expect(fixed.gear!.brakes).toBe(true);
+    expect(retract.gear!.brakes).toBe(true);
+    expect(fixed.deploy).toBeUndefined(); // always down — the drag is permanent
+    expect(retract.deploy!.reversible).toBe(true);
+    expect(retract.deploy!.effect).toBe('gear');
+    expect(fixed.dryMass * 10).toBeLessThan(retract.dryMass); // the mass win
+    expect(fixed.gear!.dragCdA).toBeLessThan(retract.gear!.dragCdA); // deployed-drag price of the mechanism is honest
+    expect(retract.gear!.maxQ).toBeGreaterThan(fixed.gear!.maxQ);
+  });
+
+  it('jets are ✈-legal only via class-gated compile (no rocket bin leak)', () => {
+    // Schema-level: every airBreathing roster engine has a catalog part,
+    // and no rocket starter references one (the bin filter is UI; this
+    // pins the data side).
+    for (const e of ENGINES.filter((x) => x.airBreathing)) {
+      expect(PARTS.some((p) => p.engineId === e.id), e.id).toBe(true);
+    }
+  });
+
   it('every referenced engine/solid exists in the physics roster', () => {
     for (const p of PARTS) {
       if (p.engineId) expect(ENGINES.some((e) => e.id === p.engineId), p.id).toBe(true);

@@ -216,6 +216,10 @@ export interface Vehicle {
   /** Plane-class lifting surfaces + trim authority. Absent for rockets
    * (the gate for all plane physics). */
   planeAero?: PlaneAero;
+  /** Landing-gear aggregate (plane class): whether it retracts (fixed
+   * gear is always down), wheel brakes, deployed drag area Cd·A [m²],
+   * and the gear-down q limit [Pa]. */
+  gear?: { retractable: boolean; brakes: boolean; dragCdA: number; maxQ: number };
 }
 
 /** Thrust-curve multiplier for a solid at burn fraction x (0 = full

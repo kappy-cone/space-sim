@@ -34,6 +34,9 @@ export interface GeomPart {
   yCp: number;
   /** Structural dynamic-pressure limit [Pa]. */
   maxQ: number;
+  /** Structural Mach limit — scalar stand-in for aerothermal/flutter
+   * limits (NOT a thermal model). Checked only at meaningful q. */
+  maxMach?: number;
   /** Aero surface that can tear off without destroying the vehicle. */
   shedable: boolean;
 }

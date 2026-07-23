@@ -5,6 +5,14 @@ the correct choice. Anything without an answer gets removed. The schema
 half of this contract is enforced by `src/physics/roster.test.ts` (every
 part cited, propulsion typed, physical fields self-consistent).
 
+**Per-class rule (since the plane class):** every part must be
+non-dominated within EVERY vehicle class it is legal in. A part legal in
+both classes needs a winning condition in both, or it gets restricted to
+one — "it wins on a plane" is not a pass for the rocket bin, and vice
+versa. The Class column says where a part is legal; ✈-only parts exist
+because nothing in the rocket bin needed them and nothing about them
+wins on a rocket.
+
 ## Propellants
 
 | Fluid | Wins when | Loses because |
@@ -51,9 +59,69 @@ part cited, propulsion typed, physical fields self-consistent).
 | Chutes (main/drogue) | Atmospheric recovery: drogue survives 12 kPa, main needs < 2.5 kPa |
 | Probe/Capsule/Station | Payloads (player cargo) with built-in RCS classes |
 
-## Control authority, by regime (all four non-dominated)
+## Plane class (✈)
+
+The class ships with the 20× headline: a turbofan's fuel-only Isp
+(6,605 s) vs a Merlin's 311 s. Jets carry no oxidizer — the atmosphere
+is the oxidizer tank — which is the entire reason the class exists. The
+regime bars in the builder render this table directly: two parts whose
+bars don't overlap are both worth carrying.
+
+### Air-breathing engines (three engines, three Mach bands)
+
+| Part | Class | Wins when | Loses because | Key numbers (sourced in parts.ts) |
+|---|---|---|---|---|
+| CFM56 Turbofan | ✈ | Subsonic anything: Isp 6,605 s, 120 kN static | Dead ≥ M0.95 and above ~12.6 km (ρ floor) | EASA TCDS; cruise point pinned by test |
+| J79 Turbojet (A/B) | ✈ | M1–2.2: only engine alive there; ram thrust rises to M2 | 1,832 s Isp — 3.6× the turbofan's burn for the same impulse | GE/USAF J79-17, max afterburner |
+| RJ43 Ramjet | ✈ | M2–4.3, to 30 km: nothing else operates there; no turbomachinery (300 kg) | **Zero static thrust — needs a boost past M1.8 to light**; 1,333 s | Marquardt Bomarc/X-7 (estimates flagged) |
+
+Why no rocket column: jets are class-restricted to planes not because a
+rocket couldn't mount one, but because a vertical-launch stack spends its
+seconds getting OUT of the envelope a jet needs — by the time q is
+survivable the density floor has passed. (Mixed propulsion on a PLANE is
+explicitly allowed — jets to altitude + rocket relight is the spaceplane
+path, and nothing blocks it.)
+
+### Lifting surfaces (three wings + tail, three regimes)
+
+| Part | Class | Wins when | Loses because | Analogue |
+|---|---|---|---|---|
+| Sailplane Wing | ✈ | Slow/efficient: AR 16.1, e 0.85 — least induced drag per lift in the game | Tears above 4 kPa q / M0.5 — it is structurally a sailplane wing | ASK-21 |
+| Transport Swept Wing | ✈ | The workhorse band to M0.9 / 19 kPa; carries real tonnage | Pays 10.8 t; induced drag beats the sailplane below ~120 kt | 737-800 |
+| Delta Wing (wet) | ✈ | Supersonic to M2.2 / 40 kPa, PLUS 75 m³ of fuel inside the structure, PLUS elevons (no tail needed) | AR 1.83: worst induced drag at low speed; clMax 1.1 (no vortex lift modeled — flagged); approach speeds are brutal | Concorde |
+| Tailplane + Elevator | ✈ | Trim authority for any tailed layout (30 % elevator, τ = 0.66) | Dead mass on a delta (elevons already trim) | 737 stabilizer |
+
+Fins vs wings across classes: fins stay rocket-legal (passive caliber
+stability at near-zero cost); a WING on a rocket is strictly worse than
+fins for stability (mass, drag) and lift is useless on a gravity-turn
+ascent — wings are ✈-only. Grid fin stays rocket-only: its q-scaled
+control niche on a plane is occupied by the elevator, which is free.
+
+### Landing gear
+
+| Part | Class | Wins when | Loses because |
+|---|---|---|---|
+| Fixed Gear | ✈ | 60 kg. Slow airframes where 0.15 m² of permanent CdA costs less than 2.6 t of mechanism | The drag never goes away; 8 kPa limit |
+| Retractable Gear | ✈ | Anything fast: clean when up, 12 kPa gear-down placard, brakes | 2.7 t — the price of clean |
+
+Legs vs gear: legs stay rocket-legal (vertical touchdown adjudication);
+gear is ✈-only (rolling touchdown). Neither dominates the other because
+they answer different landing modes.
+
+### Existing parts reviewed against the plane class
+
+Tanks/decouplers/adapters/nose cones: legal in both classes, same
+winning condition (volume, staging, drag) — no laundering. Chutes: legal
+in both (a plane may recover by canopy). RCS/CMG: legal in both; on a
+plane they lose to the elevator whenever q > ~1 kPa and win in the
+thin-air corner — same regime logic as rockets. Solids: legal on planes
+only as boost motors (the ramjet's light-off problem is real); they keep
+their rocket winning condition.
+
+## Control authority, by regime (all five non-dominated)
 
 gimbal — free, needs thrust · active fins — free, needs q ·
+elevator (✈) — free, needs q, the plane's primary ·
 CMG — free anywhere, weak, saturates · RCS — works anywhere, spends propellant (and settles tanks).
 
 ## Mechanics that keep this table honest
