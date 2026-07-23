@@ -29,7 +29,8 @@ import {
   translation,
   v3,
 } from '../gl/mat4';
-import { finMesh, groundCapMesh, moonColor, segmentsMesh, sphereMesh, terrainColor } from '../gl/mesh';
+import { finMesh, groundCapMesh, moonColor, segmentsMesh, sphereMesh, terrainColor, wingMesh } from '../gl/mesh';
+import { planeStability } from '../physics/massmodel';
 import { Renderer } from '../gl/renderer';
 import { fmtDistance, fmtMass, fmtSpeed, fmtTime } from './format';
 
@@ -108,7 +109,7 @@ export class Flight3D {
 
   constructor(
     private root: HTMLElement,
-    compiled: Compiled,
+    private compiled: Compiled,
     craft: Craft,
     private targetAltitude = 250_000,
     private onExit?: () => void,
@@ -148,8 +149,9 @@ export class Flight3D {
     this.renderer = new Renderer(this.canvas);
     for (const def of PARTS) {
       const f = def.fin;
+      const w = def.wing;
       this.renderer.mesh(def.id, () =>
-        f ? finMesh(f.cr, f.ct, f.span, f.sweep, f.thickness) : segmentsMesh(def.segments),
+        w ? wingMesh(w.cr, w.ct, w.span, w.sweep) : f ? finMesh(f.cr, f.ct, f.span, f.sweep, f.thickness) : segmentsMesh(def.segments),
       );
     }
     // One terrain sphere + local ground cap per body (the reference body
@@ -251,6 +253,12 @@ export class Flight3D {
       ['q', 'Dyn press'],
       ['mach', 'Mach'],
       ['aoa', 'AoA'],
+      ...(this.compiled.vehicle.planeAero
+        ? ([
+            ['stall', 'Stall margin'],
+            ['trim', 'Elevator'],
+          ] as [string, string][])
+        : []),
       ['margin', 'Stability'],
       ['gimbal', 'Gimbal'],
       ['settle', 'Prop state'],
@@ -373,9 +381,10 @@ export class Flight3D {
     };
     this.throttleSlider = thr;
 
+    const hasGear = !!this.compiled.vehicle.gear;
     const legsBtn = document.createElement('button');
-    legsBtn.textContent = 'Legs (G)';
-    legsBtn.onclick = () => this.sim.deployLegs();
+    legsBtn.textContent = hasGear ? 'Gear (G)' : 'Legs (G)';
+    legsBtn.onclick = () => this.sim.deploy(hasGear ? 'gear' : 'legs');
     const chuteBtn = document.createElement('button');
     chuteBtn.textContent = 'Chute (P)';
     chuteBtn.onclick = () => this.sim.deployChutes();
@@ -496,7 +505,7 @@ export class Flight3D {
     } else if (e.key === '.') this.setWarp(this.warpIndex + 1);
     else if (e.key === ',') this.setWarp(this.warpIndex - 1);
     else if (e.key === 'a') this.toggleAutopilot();
-    else if (e.key === 'g') this.sim.deployLegs();
+    else if (e.key === 'g') this.sim.deploy(this.compiled.vehicle.gear ? 'gear' : 'legs');
     else if (e.key === 'p') this.sim.deployChutes();
     else if (e.key === 't') this.sim.rcsSettle = !this.sim.rcsSettle;
     else if (e.key === 'u') this.sim.fireUllageMotor();
@@ -639,6 +648,15 @@ export class Flight3D {
           break;
         case 'flameout':
           text = `⚠ Flameout — propellant unsettled (ignition spent). Settle with RCS (T) or an ullage motor (U), then relight`;
+          break;
+        case 'jetFlameout':
+          text = `⚠ Jet flameout — ${ev.reason}`;
+          break;
+        case 'gearDeployed':
+          text = 'Landing gear down';
+          break;
+        case 'gearRetracted':
+          text = 'Landing gear up';
           break;
         case 'engineDestroyed':
           text = `✗ Stage ${ev.stage + 1} engines destroyed — ${ev.reason}`;
@@ -1066,10 +1084,15 @@ export class Flight3D {
     const surfaceG = s.body.mu / (s.body.radius * s.body.radius);
     let twr = 0;
     if (stage && s.actualThrottle > 0) {
-      // Display TWR from current acceleration capability at the local
-      // ambient pressure — vacuum thrust overstates it at sea level.
-      const p = s.body.atmosphere?.pressure(Math.max(0, s.altitude)) ?? 0;
-      twr = (s.actualThrottle * stageThrustAtPressure(stage, p)) / (s.state.m * surfaceG);
+      if (stage.engines.some((g) => g.engine.airBreathing)) {
+        // Jets: thrust is T(M, ρ) — the sim's live readout is the truth.
+        twr = s.thrustNow / (s.state.m * surfaceG);
+      } else {
+        // Display TWR from current acceleration capability at the local
+        // ambient pressure — vacuum thrust overstates it at sea level.
+        const p = s.body.atmosphere?.pressure(Math.max(0, s.altitude)) ?? 0;
+        twr = (s.actualThrottle * stageThrustAtPressure(stage, p)) / (s.state.m * surfaceG);
+      }
     }
     this.set('twr', twr.toFixed(2), twr > 0 && twr < 1 ? 'warn' : '');
     this.set('throttle', `${Math.round(s.throttle * 100)} % → ${Math.round(s.actualThrottle * 100)} %`);
@@ -1077,12 +1100,37 @@ export class Flight3D {
     this.set('q', `${(s.q / 1000).toFixed(1)} kPa`, s.q > 60_000 ? 'warn' : '');
     this.set('mach', s.mach > 0.05 ? s.mach.toFixed(2) : '—', s.mach > 0.85 && s.mach < 1.3 ? 'warn' : '');
     this.set('aoa', `${((s.aoa * 180) / Math.PI).toFixed(1)}°`, Math.abs(s.aoa) > 0.15 && s.q > 5_000 ? 'warn' : '');
-    const margin = props.staticMarginCal;
-    this.set(
-      'margin',
-      props.cnAlpha > 0 ? `${margin.toFixed(1)} cal` : '—',
-      s.q > 1_000 ? (margin >= 0.2 ? 'good' : margin >= 0 ? 'warn' : 'bad') : '',
-    );
+    const pa = this.compiled.vehicle.planeAero;
+    if (pa) {
+      // Plane class: %MAC + stall margin + elevator — never calibers.
+      if (pa.surfaces.length > 0) {
+        const st = planeStability(props, this.compiled.geometry.refArea, pa);
+        this.set(
+          'margin',
+          isNaN(st.staticMarginPctMAC) ? '—' : `${st.staticMarginPctMAC.toFixed(0)}% MAC`,
+          s.q > 500 ? (st.staticMarginPctMAC >= 3 ? 'good' : st.staticMarginPctMAC >= 0 ? 'warn' : 'bad') : '',
+        );
+        const smDeg = (s.stallMargin * 180) / Math.PI;
+        this.set(
+          'stall',
+          s.stalled ? 'STALL' : isFinite(smDeg) ? `${smDeg.toFixed(1)}°` : '—',
+          s.stalled ? 'bad' : smDeg < 5 && s.q > 500 ? 'warn' : '',
+        );
+        this.set('trim', `δe ${((s.elevator * 180) / Math.PI).toFixed(1)}°`,
+          Math.abs(s.elevator) > 0.8 * pa.elevMax ? 'warn' : '');
+      } else {
+        this.set('margin', 'no wings', 'warn');
+        this.set('stall', '—');
+        this.set('trim', '—');
+      }
+    } else {
+      const margin = props.staticMarginCal;
+      this.set(
+        'margin',
+        props.cnAlpha > 0 ? `${margin.toFixed(1)} cal` : '—',
+        s.q > 1_000 ? (margin >= 0.2 ? 'good' : margin >= 0 ? 'warn' : 'bad') : '',
+      );
+    }
     this.set('gimbal', `${((s.gimbal * 180) / Math.PI).toFixed(1)}°`);
     // Ullage state: pump-fed relights need settled propellant.
     const settleTxt = s.settled
@@ -1150,12 +1198,17 @@ export class Flight3D {
         isFinite(hBurn) && radar < hBurn * 1.15 ? (radar < hBurn ? 'bad' : 'warn') : '',
       );
       this.set('impact', this.impact ? fmtTime(this.impact.dt) : '—');
-      this.set(
-        'gear',
-        `${s.legFootprint() > 0 ? 'legs ✓' : this.sim.legsDeployed ? 'no legs' : 'stowed'} · ${
-          s.activeChutes().length > 0 ? 'chute ✓' : 'no chute'
-        }`,
-      );
+      if (this.compiled.vehicle.gear) {
+        this.set('gear', s.gearFailed ? 'gear TORN OFF' : s.gearDeployed ? 'gear down ✓' : 'gear UP',
+          s.gearFailed ? 'bad' : s.gearDeployed ? 'good' : 'warn');
+      } else {
+        this.set(
+          'gear',
+          `${s.legFootprint() > 0 ? 'legs ✓' : this.sim.legsDeployed ? 'no legs' : 'stowed'} · ${
+            s.activeChutes().length > 0 ? 'chute ✓' : 'no chute'
+          }`,
+        );
+      }
     } else {
       this.landingPanel.style.display = 'none';
     }

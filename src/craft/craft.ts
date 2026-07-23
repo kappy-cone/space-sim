@@ -334,13 +334,17 @@ export function placements(craft: Craft): Map<string, Placement> {
       } else {
         // Radial: n instances around the parent's axis. Bodies stand off
         // side-by-side; fins mount flush; fairing shells sit centered
-        // around the stack.
+        // around the stack. Wings are the PAIR: one instance centered on
+        // the axis at the fixed mirror azimuth (±90° — spanwise is
+        // out-of-plane in the planar sim), wherever the drag dropped it.
         const pr = radiusAt(def, child.attach.y);
-        const dist = cDef.fin ? pr : cDef.fairing ? 0 : pr + cDef.maxRadius;
+        const dist = cDef.fin ? pr : cDef.fairing || cDef.wing ? 0 : pr + cDef.maxRadius;
         const newCopies: { x: number; z: number; angle: number }[] = [];
         for (const c of copies) {
           for (let k = 0; k < child.symmetry; k++) {
-            const a = child.attach.angle + (2 * Math.PI * k) / child.symmetry + c.angle;
+            const a = cDef.wing
+              ? Math.PI / 2 + c.angle
+              : child.attach.angle + (2 * Math.PI * k) / child.symmetry + c.angle;
             // Instance angle = its own azimuth (orients fin meshes outward).
             newCopies.push({ x: c.x + Math.cos(a) * dist, z: c.z + Math.sin(a) * dist, angle: a });
           }

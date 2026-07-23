@@ -331,6 +331,35 @@ button.mini {
   margin-left: 3px;
 }
 
+.class-row {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+.class-row b { color: var(--text); }
+
+.regime-bars {
+  display: block;
+  margin-top: 3px;
+}
+.regime-track {
+  display: block;
+  position: relative;
+  height: 4px;
+  margin-top: 2px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.regime-band {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 2px;
+}
+.regime-band.mach { background: #6fb3e8; }
+.regime-band.alt { background: #7ec87e; }
+
 .drain-flow {
   font-size: 11px;
   margin-top: 3px;

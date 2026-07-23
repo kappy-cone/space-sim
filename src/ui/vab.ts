@@ -27,7 +27,9 @@ import {
 } from '../craft/craft';
 import { OrbitCamera } from '../gl/camera';
 import { multiply, rotationY, scaling, scalingXYZ, translation, v3 } from '../gl/mat4';
-import { finMesh, gridMesh, segmentsMesh } from '../gl/mesh';
+import { finMesh, gridMesh, segmentsMesh, wingMesh } from '../gl/mesh';
+import { planeStability } from '../physics/massmodel';
+import { density } from '../physics/atmosphere';
 import { rayFrustums } from '../gl/ray';
 import { Renderer } from '../gl/renderer';
 import { fmtDeltaV, fmtMass, fmtTime } from './format';
@@ -35,6 +37,62 @@ import { fmtDeltaV, fmtMass, fmtTime } from './format';
 const SYMMETRY_CYCLE = [1, 2, 3, 4, 6, 8];
 const CLUSTER_CYCLE = [1, 2, 3, 4, 5, 7, 9];
 const STORAGE_KEY = 'space-sim.craft';
+
+type VehicleClass = 'rocket' | 'plane';
+
+/** Bin legality per class (docs/PARTS.md per-class rule): the bin only
+ * shows parts with a winning condition in the selected class. */
+function partLegal(def: PartDef, cls: VehicleClass): boolean {
+  if (cls === 'rocket') {
+    if (def.kind === 'wing' || def.kind === 'gear') return false;
+    if (def.engineId && engineById(def.engineId).airBreathing) return false;
+  } else {
+    // Fins lose to wings for lift and to the elevator for control;
+    // legs answer vertical touchdown, gear answers rolling.
+    if (def.kind === 'fin' || def.kind === 'leg') return false;
+  }
+  return true;
+}
+
+/** Altitude where air density drops to rho [m] (jet ceiling display). */
+function ceilingOf(rho: number): number {
+  let h = 0;
+  while (h < 30_000 && density(h) > rho) h += 250;
+  return h;
+}
+
+/**
+ * Regime bar: where a propulsion or lifting part produces useful output,
+ * over Mach (0–5) and altitude (0–30 km). Two parts whose bars don't
+ * overlap are visibly both worth carrying — the non-domination table
+ * rendered into the bin (raw Isp numbers mislead across a 20× gap).
+ */
+function regimeBar(def: PartDef): string {
+  let machBand: [number, number] | null = null;
+  let altBand: [number, number] | null = null;
+  const eid = def.engineId ?? def.solidMotor;
+  if (eid) {
+    const e = engineById(eid);
+    if (e.airBreathing) {
+      machBand = [e.airBreathing.minMach, Math.min(e.airBreathing.maxMach, 5)];
+      altBand = [0, ceilingOf(e.airBreathing.rhoFloor)];
+    } else {
+      machBand = [0, 5]; // rockets: any Mach, any altitude — Isp is the price
+      altBand = [0, 30_000];
+    }
+  } else if (def.wing) {
+    machBand = [0, Math.min(def.maxMach ?? 5, 5)];
+    altBand = [0, 30_000]; // wings are q-limited, not altitude-limited
+  } else {
+    return '';
+  }
+  const seg = (band: [number, number], max: number, cls: string): string =>
+    `<span class="regime-band ${cls}" style="left:${(100 * band[0]) / max}%;width:${(100 * (band[1] - band[0])) / max}%"></span>`;
+  return `<span class="regime-bars" title="useful-output envelope — top: Mach 0–5, bottom: altitude 0–30 km">
+    <span class="regime-track">${seg(machBand, 5, 'mach')}</span>
+    <span class="regime-track">${seg(altBand, 30_000, 'alt')}</span>
+  </span>`;
+}
 
 interface Ghost {
   parentId: string;
@@ -105,8 +163,9 @@ export class Vab {
     this.renderer = new Renderer(this.canvas);
     for (const def of PARTS) {
       const f = def.fin;
+      const w = def.wing;
       this.renderer.mesh(def.id, () =>
-        f ? finMesh(f.cr, f.ct, f.span, f.sweep, f.thickness) : segmentsMesh(def.segments),
+        w ? wingMesh(w.cr, w.ct, w.span, w.sweep) : f ? finMesh(f.cr, f.ct, f.span, f.sweep, f.thickness) : segmentsMesh(def.segments),
       );
     }
     this.renderer.mesh('node', () =>
@@ -152,24 +211,47 @@ export class Vab {
   private buildPalette(): void {
     this.paletteEl = document.createElement('div');
     this.paletteEl.className = 'vab-palette panel';
+    this.root.appendChild(this.paletteEl);
+    this.fillPalette();
+  }
+
+  /** Current craft's class (absent = rocket, back-compat with saves). */
+  private get vehicleClass(): VehicleClass {
+    return this.craft.vehicleClass ?? 'rocket';
+  }
+
+  private paletteClass: VehicleClass | null = null;
+
+  /** (Re)fill the bin for the current class — the class is chosen at
+   * build start and constrains what the bin offers. */
+  private fillPalette(): void {
+    this.paletteClass = this.vehicleClass;
+    this.paletteEl.innerHTML = '';
+    const classRow = document.createElement('div');
+    classRow.className = 'class-row';
+    classRow.innerHTML = `<b>${this.vehicleClass === 'plane' ? '✈ Plane' : '🚀 Rocket'}</b> parts bin`;
+    this.paletteEl.appendChild(classRow);
     const kinds: [string[], string][] = [
       [['payload'], 'Payload'],
       [['tank'], 'Tanks (length adjustable)'],
       [['engine'], 'Engines & Boosters'],
+      [['wing'], 'Wings & Tails'],
       [['decoupler'], 'Staging & Pylons'],
       [['adapter'], 'Adapters'],
       [['nose', 'fin'], 'Aero & Fairings'],
       [['control'], 'Control'],
-      [['leg', 'chute'], 'Landing & Recovery'],
+      [['leg', 'chute', 'gear'], 'Landing & Recovery'],
     ];
     for (const [group, title] of kinds) {
+      const parts = PARTS.filter((p) => group.includes(p.kind) && !p.hidden && partLegal(p, this.vehicleClass));
+      if (parts.length === 0) continue;
       const h = document.createElement('h3');
       h.textContent = title;
       this.paletteEl.appendChild(h);
-      for (const def of PARTS.filter((p) => group.includes(p.kind) && !p.hidden)) {
+      for (const def of parts) {
         const b = document.createElement('button');
         b.className = 'part-btn';
-        b.textContent = def.name;
+        b.innerHTML = `${def.name}${regimeBar(def)}`;
         b.title = partStats(def);
         b.onclick = () => {
           this.holding = def;
@@ -189,11 +271,23 @@ export class Vab {
     redoBtn.textContent = '↷ Redo';
     redoBtn.onclick = () => this.redo();
     const newBtn = document.createElement('button');
-    newBtn.textContent = 'New craft';
+    newBtn.textContent = 'New rocket';
     newBtn.onclick = () => {
-      console.warn('[vab] New craft clicked — replacing current craft');
+      console.warn('[vab] New rocket clicked — replacing current craft');
       this.pushUndo();
       this.craft = newCraft('capsule');
+      this.selectedId = null;
+      this.recompile();
+    };
+    const planeBtn = document.createElement('button');
+    planeBtn.textContent = 'New plane';
+    planeBtn.onclick = () => {
+      console.warn('[vab] New plane clicked — replacing current craft');
+      this.pushUndo();
+      const c = newCraft('probe');
+      c.vehicleClass = 'plane';
+      c.name = 'Untitled Plane';
+      this.craft = c;
       this.selectedId = null;
       this.recompile();
     };
@@ -205,10 +299,9 @@ export class Vab {
       this.selectedId = null;
       this.recompile();
     };
-    actions.append(undoBtn, redoBtn, newBtn, refBtn);
+    actions.append(undoBtn, redoBtn, newBtn, planeBtn, refBtn);
     this.paletteEl.appendChild(actions);
     this.buildHangar();
-    this.root.appendChild(this.paletteEl);
   }
 
   // ---------- hangar (saved builds + starters) ----------
@@ -418,14 +511,21 @@ export class Vab {
 
   private renderStats(): void {
     const c = this.compiled;
+    // Jet stages: Tsiolkovsky Δv over a fuel-only 6,600 s Isp is not an
+    // orbit claim — jets can't leave the envelope. Their rows show burn
+    // time and static TWR; the Δv cells are honest dashes.
+    const jetStage = c.vehicle.stages.map(
+      (st) => st.engines.length > 0 && st.engines.every((g) => g.engine.airBreathing),
+    );
     const rows = c.stages
       .map((cs, i) => {
         const r = c.reports[i]!;
         const noEngines = cs.stage.engines.length === 0;
+        const jet = jetStage[i]!;
         return `<tr>
           <td>S${i + 1}</td>
-          <td class="num">${noEngines ? '—' : fmtDeltaV(r.deltaV)}</td>
-          <td class="num">${noEngines || r.deltaVSeaLevel <= 0 ? '—' : fmtDeltaV(r.deltaVSeaLevel)}</td>
+          <td class="num">${noEngines ? '—' : jet ? 'air' : fmtDeltaV(r.deltaV)}</td>
+          <td class="num">${noEngines || jet || r.deltaVSeaLevel <= 0 ? '—' : fmtDeltaV(r.deltaVSeaLevel)}</td>
           <td class="num">${noEngines ? '—' : r.twrIgnition.toFixed(2)}</td>
           <td class="num">${noEngines ? '—' : r.twrBurnout.toFixed(2)}</td>
           <td class="num">${noEngines || !isFinite(r.burnTime) ? '—' : fmtTime(r.burnTime)}</td>
@@ -433,20 +533,81 @@ export class Vab {
         </tr>`;
       })
       .join('');
-    const m = c.verdict.margin;
-    const verdict = c.verdict.ok
-      ? `<div class="verdict good">Should make orbit — ${fmtDeltaV(m)} of margin</div>`
-      : `<div class="verdict bad">${fmtDeltaV(-m)} short of orbit (needs ~${fmtDeltaV(LEO_BUDGET)})</div>`;
-    // Aerodynamic stability: static margin in calibers (CoM/CoP markers on
-    // the vehicle: ● blue = CoM, ● red = CoP).
-    const marginFull = c.aero.full.staticMarginCal;
-    const marginEmpty = c.aero.empty.staticMarginCal;
-    const hasAero = c.aero.full.cnAlpha > 0;
-    const stabCls = !hasAero || marginFull >= 0.5 ? 'good' : marginFull >= 0 ? 'warn-v' : 'bad';
-    const stability = hasAero
-      ? `<div class="verdict ${stabCls}">Aero: ${marginFull >= 0 ? 'stable' : 'UNSTABLE'} — margin ${marginFull.toFixed(1)} cal (dry ${marginEmpty.toFixed(1)})
-         <span class="legend"><i class="dot com"></i>CoM <i class="dot cop"></i>CoP</span></div>`
-      : '';
+    let verdict: string;
+    let totalDvLine: string;
+    if (c.vehicle.planeAero) {
+      // Plane verdict: no LEO comparison. Report what's aboard — rocket
+      // Δv (the spaceplane path) and jet endurance at static burn.
+      const rocketDv = c.reports.reduce((sum, r, i) => (jetStage[i]! || c.stages[i]!.stage.engines.length === 0 ? sum : sum + r.deltaV), 0);
+      const jetFuel = c.vehicle.stages.reduce(
+        (sum, st, i) => (jetStage[i]! ? sum + st.tanks.reduce((s2, t) => s2 + t.propellantMass, 0) : sum),
+        0,
+      );
+      const jetBurn = c.reports.reduce((sum, r, i) => (jetStage[i]! && isFinite(r.burnTime) ? sum + r.burnTime : sum), 0);
+      const bits = [
+        jetFuel > 0 ? `jet fuel ${fmtMass(jetFuel)} (~${fmtTime(jetBurn)} at full static burn)` : '',
+        rocketDv > 0 ? `rocket Δv aboard: ${fmtDeltaV(rocketDv)}` : '',
+      ].filter(Boolean);
+      verdict = bits.length > 0 ? `<div class="verdict good">${bits.join(' · ')}</div>` : '';
+      totalDvLine =
+        rocketDv > 0 ? `<div class="total-dv">Rocket Δv: <b>${fmtDeltaV(rocketDv)}</b></div>` : '';
+    } else {
+      const m = c.verdict.margin;
+      verdict = c.verdict.ok
+        ? `<div class="verdict good">Should make orbit — ${fmtDeltaV(m)} of margin</div>`
+        : `<div class="verdict bad">${fmtDeltaV(-m)} short of orbit (needs ~${fmtDeltaV(LEO_BUDGET)})</div>`;
+      totalDvLine = `<div class="total-dv">Total Δv: <b>${fmtDeltaV(c.totalDeltaV)}</b></div>`;
+    }
+    // Aerodynamic stability — presentation is CLASS-DEPENDENT. Rockets:
+    // caliber margin (CoP behind CoM). Planes: static margin in % MAC +
+    // trim authority — NEVER calibers on an aircraft (a plane built to
+    // rocket margins is stable, nose-heavy, and will not rotate).
+    let stability = '';
+    const pa = c.vehicle.planeAero;
+    if (pa) {
+      if (pa.surfaces.length === 0) {
+        stability = `<div class="verdict warn-v">Aero: no lifting surfaces — add wings</div>`;
+      } else {
+        const st = planeStability(c.aero.full, c.geometry.refArea, pa);
+        const stDry = planeStability(c.aero.empty, c.geometry.refArea, pa);
+        // Trim authority: the α the elevator can hold against the static
+        // stability moment (both scale with q, so q cancels).
+        let elevPerRad = 0;
+        let W = c.aero.full.cnAlpha > 0 ? c.aero.full.cnAlpha * c.geometry.refArea : 0;
+        let stallDeg = Infinity;
+        for (const s of pa.surfaces) {
+          W += s.a * (s.downwash ?? 1) * s.S;
+          if (s.tau) elevPerRad += s.a * s.tau * s.S * (s.y - c.aero.full.yCoM);
+          stallDeg = Math.min(stallDeg, ((s.clMax / s.a) * 180) / Math.PI);
+        }
+        const stabPerRad = W * (c.aero.full.yCoM - st.yNP); // restoring moment per α per q
+        const trimAlphaDeg =
+          Math.abs(stabPerRad) > 1e-9 ? Math.abs((elevPerRad * pa.elevMax) / stabPerRad) * (180 / Math.PI) : Infinity;
+        // Bands: SM 3–25 %MAC flies (Raymer: transports ~5–15 %); trim
+        // must reach rotation α (~10°) or the plane won't lift the nose.
+        const smOk = st.staticMarginPctMAC >= 3 && st.staticMarginPctMAC <= 25;
+        const smMarginal = st.staticMarginPctMAC >= 0 && st.staticMarginPctMAC <= 40;
+        const trimOk = trimAlphaDeg >= 10;
+        const cls = smOk && trimOk ? 'good' : smMarginal && trimAlphaDeg >= 5 ? 'warn-v' : 'bad';
+        const smTxt = isNaN(st.staticMarginPctMAC)
+          ? 'n/a'
+          : `${st.staticMarginPctMAC.toFixed(0)}% MAC (dry ${stDry.staticMarginPctMAC.toFixed(0)}%)`;
+        const trimTxt = isFinite(trimAlphaDeg)
+          ? `trim holds α to ${trimAlphaDeg.toFixed(0)}°${isFinite(stallDeg) ? ` (stall ${stallDeg.toFixed(0)}°)` : ''}`
+          : 'no elevator — add a tail or elevons';
+        stability = `<div class="verdict ${cls}">Aero: static margin ${smTxt} · ${trimTxt}
+           <span class="legend"><i class="dot com"></i>CoM <i class="dot cop"></i>NP</span></div>`;
+      }
+    } else {
+      const marginFull = c.aero.full.staticMarginCal;
+      const marginEmpty = c.aero.empty.staticMarginCal;
+      const hasAero = c.aero.full.cnAlpha > 0;
+      const stabCls = !hasAero || marginFull >= 0.5 ? 'good' : marginFull >= 0 ? 'warn-v' : 'bad';
+      stability = hasAero
+        ? `<div class="verdict ${stabCls}">Aero: ${marginFull >= 0 ? 'stable' : 'UNSTABLE'} — margin ${marginFull.toFixed(1)} cal (dry ${marginEmpty.toFixed(1)})
+           <span class="legend"><i class="dot com"></i>CoM <i class="dot cop"></i>CoP</span></div>`
+        : '';
+    }
     const warnings = c.warnings.map((w) => `<div class="warning">⚠ ${w}</div>`).join('');
     this.statsEl.innerHTML = `
       <h3>Vehicle</h3>
@@ -454,7 +615,7 @@ export class Vab {
         <tr><th></th><th>Δv vac</th><th>Δv SL</th><th>TWR ign</th><th>TWR burn</th><th>Burn</th><th>Mass</th></tr>
         ${rows}
       </table>
-      <div class="total-dv">Total Δv: <b>${fmtDeltaV(c.totalDeltaV)}</b></div>
+      ${totalDvLine}
       ${verdict}
       ${stability}
       ${warnings}
@@ -603,6 +764,8 @@ export class Vab {
 
   private recompile(): void {
     this.compiled = compile(this.craft);
+    // Class switch (new build / hangar load): the bin follows the class.
+    if (this.paletteClass !== null && this.paletteClass !== this.vehicleClass) this.fillPalette();
     // Safety net: if this save shrinks the craft, stash the previous
     // version (recover with localStorage 'space-sim.craft.bak').
     const prev = localStorage.getItem(STORAGE_KEY);
@@ -1080,7 +1243,31 @@ export class Vab {
 function partStats(def: PartDef): string {
   const lines: string[] = [];
   const eid = def.engineId ?? def.solidMotor;
-  if (eid) {
+  if (eid && engineById(eid).airBreathing) {
+    const e = engineById(eid);
+    const ab = e.airBreathing!;
+    lines.push(`air-breathing — no oxidizer aboard (fuel-only Isp ${e.ispVac} s ≈ ${Math.round(e.ispVac / 311)}× a Merlin)`);
+    lines.push(`${(e.thrustSL / 1000).toFixed(0)} kN static · ${fmtMass(def.dryMass)}`);
+    lines.push(
+      ab.minMach > 0
+        ? `⚠ needs Mach ${ab.minMach} to light — carry a booster`
+        : `envelope: Mach 0–${ab.maxMach}`,
+    );
+    lines.push(`ceiling ≈ ${(ceilingOf(ab.rhoFloor) / 1000).toFixed(0)} km (air density floor)`);
+  } else if (def.wing) {
+    const w = def.wing;
+    const S = ((w.cr + w.ct) / 2) * w.span;
+    const ar = (w.span * w.span) / S;
+    lines.push(`S ${S.toFixed(0)} m² · AR ${ar.toFixed(1)} · e ${w.e} · Cl_max ${w.clMax}`);
+    lines.push(`incidence ${((w.incidence * 180) / Math.PI).toFixed(0)}°${w.controlFraction ? ` · control surface ${Math.round(w.controlFraction * 100)}% chord` : ''}`);
+    if (w.tankVolume) lines.push(`wet wing: ${w.tankVolume} m³ fuel inside the structure`);
+    lines.push(`⚠ limits: ${(def.maxQ! / 1000).toFixed(0)} kPa q · Mach ${def.maxMach}`);
+    lines.push(fmtMass(def.dryMass));
+  } else if (def.gear) {
+    lines.push(fmtMass(def.dryMass));
+    lines.push(def.deploy ? `retractable · gear-down limit ${(def.gear.maxQ / 1000).toFixed(0)} kPa` : 'fixed — always down, drag always paid');
+    lines.push(`deployed drag CdA ${def.gear.dragCdA} m²${def.gear.brakes ? ' · wheel brakes' : ''}`);
+  } else if (eid) {
     const e = engineById(eid);
     if (e.propellant !== 'solid') {
       lines.push(`${e.propellant} · ρ ${propellantById(e.propellant).bulkDensity} kg/m³`);

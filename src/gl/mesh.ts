@@ -123,6 +123,38 @@ export function finMesh(cr: number, ct: number, span: number, sweep: number, thi
   };
 }
 
+/**
+ * Wing PAIR: two mirrored trapezoid plates spanning ±span/2 from the
+ * fuselage axis (a wing part is the whole pair — the planar sim has no
+ * roll axis to tell halves apart). Same chord conventions as finMesh;
+ * plate thickness ≈ 4% of mean chord (visual only).
+ */
+export function wingMesh(cr: number, ct: number, span: number, sweep: number): MeshData {
+  const half = finMesh(cr, ct, span / 2, sweep, 0.04 * ((cr + ct) / 2));
+  const pos = new Float32Array(half.positions.length * 2);
+  const nrm = new Float32Array(half.normals.length * 2);
+  const idx = new Uint16Array(half.indices.length * 2);
+  pos.set(half.positions, 0);
+  nrm.set(half.normals, 0);
+  idx.set(half.indices, 0);
+  const vBase = half.positions.length / 3;
+  for (let i = 0; i < half.positions.length; i += 3) {
+    pos[half.positions.length + i] = -half.positions[i]!; // mirror x
+    pos[half.positions.length + i + 1] = half.positions[i + 1]!;
+    pos[half.positions.length + i + 2] = half.positions[i + 2]!;
+    nrm[half.normals.length + i] = -half.normals[i]!;
+    nrm[half.normals.length + i + 1] = half.normals[i + 1]!;
+    nrm[half.normals.length + i + 2] = half.normals[i + 2]!;
+  }
+  // Mirrored triangles need reversed winding.
+  for (let i = 0; i < half.indices.length; i += 3) {
+    idx[half.indices.length + i] = vBase + half.indices[i]!;
+    idx[half.indices.length + i + 1] = vBase + half.indices[i + 2]!;
+    idx[half.indices.length + i + 2] = vBase + half.indices[i + 1]!;
+  }
+  return { positions: pos, normals: nrm, indices: idx };
+}
+
 /** Unit lat-long sphere with the poles on ±z (the rotation axis of a body
  * whose equator lies in the world x-y plane). Optional per-vertex color
  * from (lat, lon) — used for terrain. */

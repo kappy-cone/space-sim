@@ -34,6 +34,7 @@ import {
   GeomPart,
   finSet,
   massProperties,
+  planeStability,
   transition,
 } from '../physics/massmodel';
 import {
@@ -687,7 +688,9 @@ export function compile(craft: Craft): Compiled {
     }
   }
   const r0 = reports[0];
-  if (r0 && isFinite(r0.twrIgnition) && r0.twrIgnition > 0 && r0.twrIgnition < 1) {
+  // TWR < 1 is a ROCKET failure (vertical liftoff). A plane's thrust
+  // only has to beat drag on the roll — wings do the lifting.
+  if (!planeAero && r0 && isFinite(r0.twrIgnition) && r0.twrIgnition > 0 && r0.twrIgnition < 1) {
     warnings.push(`Liftoff TWR ${r0.twrIgnition.toFixed(2)} < 1 — it will not leave the pad.`);
   }
   for (let i = 1; i < compiled.length; i++) {
@@ -709,6 +712,9 @@ export function compile(craft: Craft): Compiled {
   let mTot = 0;
   for (const [id, pl] of place) {
     const def = pl.def;
+    // Gear is a belly assembly (nose + main pairs along the axis) — its
+    // render-side standoff is visual, the mass rides on-axis.
+    if (def.kind === 'gear') continue;
     const perInst = (def.dryMass + (def.propellant ?? 0)) * (instanceCount(craft, id) / pl.instances.length);
     for (const i of pl.instances) {
       offX += perInst * i.x;
@@ -731,7 +737,18 @@ export function compile(craft: Craft): Compiled {
       warnings.push(`1× ${def.name} attached radially without symmetry — asymmetric.`);
     }
   }
-  if (p0Unstable(aero.full)) {
+  if (planeAero) {
+    // Plane stability speaks %MAC, never calibers (the readout carries
+    // the number; the warning fires only on outright instability).
+    if (planeAero.surfaces.length > 0) {
+      const st = planeStability(aero.full, geometry.refArea, planeAero);
+      if (st.staticMarginPctMAC < 0) {
+        warnings.push(
+          `Unstable: neutral point ${(-st.staticMarginPctMAC).toFixed(0)}% MAC ahead of CoM — move wings aft or mass forward.`,
+        );
+      }
+    }
+  } else if (p0Unstable(aero.full)) {
     warnings.push(
       `Aerodynamically unstable: CoP ${(-aero.full.staticMarginCal).toFixed(1)} calibers ahead of CoM — it will flip at max-Q unless gimbal authority holds it. Move fins aft or mass forward.`,
     );

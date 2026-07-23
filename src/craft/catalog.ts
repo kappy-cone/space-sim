@@ -175,6 +175,7 @@ const FLUID_TINT: Record<string, [number, number, number]> = {
   hydrolox: [0.86, 0.88, 0.95],
   methalox: [0.78, 0.83, 0.82],
   hypergolic: [0.82, 0.78, 0.7],
+  jetfuel: [0.75, 0.76, 0.7],
 };
 
 function tank(id: string, name: string, fluid: PropellantId, r: number, h: number, range: { min: number; max: number }, hidden = false): PartDef {
@@ -289,6 +290,9 @@ export const PARTS: readonly PartDef[] = [
   tank('m37', 'Methalox Tank 3.7 m', 'methalox', 1.85, 10, R37),
   tank('hyp12', 'Hypergolic Tank 1.2 m', 'hypergolic', 0.6, 1.6, R12),
   tank('hyp24', 'Hypergolic Tank 2.4 m', 'hypergolic', 1.2, 2.5, R24),
+  // Jet fuel (plane class): the fuselage IS mostly tank on a jet.
+  tank('jf12', 'Jet Fuel Tank 1.2 m', 'jetfuel', 0.6, 4, R12),
+  tank('jf24', 'Jet Fuel Tank 2.4 m', 'jetfuel', 1.2, 6, R24),
   // Legacy aliases (saved crafts): kerolox, fixed default lengths.
   tank('t12-s', 'Kerolox Tank 1.2 m (short)', 'kerolox', 0.6, 1.8, R12, true),
   tank('t24-s', 'Kerolox Tank 2.4 m (short)', 'kerolox', 1.2, 3.5, R24, true),
