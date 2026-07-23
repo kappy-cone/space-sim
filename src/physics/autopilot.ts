@@ -5,9 +5,9 @@
 // All orbital math is relative to the sim's reference body.
 
 import { SPOOL_TAU, Sim } from './sim';
-import { norm } from './vec2';
+import { dot, norm } from './vec2';
 import { CelestialBody, EARTH } from './bodies';
-import { stageDryMass, stageEffectiveVe, stageMassFlow, stagePropellant, stageThrustVac } from './vehicle';
+import { stageDryMass, stageEffectiveVe, stageIgnitionLimit, stageMassFlow, stagePropellant, stageThrustVac } from './vehicle';
 
 export type AutopilotPhase = 'ascent' | 'coast' | 'circularize' | 'done' | 'failed';
 
@@ -96,8 +96,22 @@ export class Autopilot {
         }
         sim.throttle = 1;
         if (el.rApo >= this.plan.targetRadius) {
-          sim.throttle = 0;
-          this.phase = 'coast';
+          // Shutting down a stage with a spent ignition budget is fatal —
+          // it can never relight for the circularization burn. Real
+          // practice (Atlas V): the single-ignition booster burns to
+          // DEPLETION and the restartable upper stage absorbs the
+          // dispersion. Hold the local horizontal meanwhile so the extra
+          // impulse feeds orbital speed, not apoapsis overshoot.
+          const stage = sim.vehicle.stages[sim.stageIndex];
+          const noRelight =
+            stage !== undefined &&
+            (sim.ignitionsUsed[sim.stageIndex] ?? 0) >= stageIgnitionLimit(stage);
+          if (noRelight && sim.stageIndex < sim.vehicle.stages.length - 1 && sim.propellant > 0) {
+            sim.attitude = { mode: 'pitch', angle: Math.PI / 2 };
+          } else {
+            sim.throttle = 0;
+            this.phase = 'coast';
+          }
         }
         break;
       }
@@ -125,13 +139,28 @@ export class Autopilot {
         // *centered* on the target — the old periapsis-threshold cutoff
         // kept adding energy until Pe caught up, overshooting Ap by
         // hundreds of km whenever the stage had Δv margin.
-        sim.attitude = { mode: 'prograde' };
+        // Far off-tangential (a long low-TWR insertion entered steeply),
+        // prograde feeds RADIAL speed: energy piles into an apoapsis
+        // overshoot while the periapsis floor keeps the burn alive. Hold
+        // the LOCAL HORIZONTAL there instead, so thrust builds angular
+        // momentum (raises the opposite apsis) — the classical constant-
+        // altitude insertion. Threshold: above the reference profile's
+        // steepest circularization entry (~22°), so short healthy burns
+        // keep exact prograde steering (ESTIMATE/tuning).
+        const MAX_TANGENT_FPA = (25 * Math.PI) / 180;
+        const speed = norm(sim.state.v);
+        const radius = norm(sim.state.r);
+        const sinFpa =
+          radius > 0 && speed > 0 ? dot(sim.state.r, sim.state.v) / (radius * speed) : 0;
+        sim.attitude =
+          Math.abs(Math.asin(Math.max(-1, Math.min(1, sinFpa)))) > MAX_TANGENT_FPA
+            ? { mode: 'pitch', angle: Math.PI / 2 }
+            : { mode: 'prograde' };
         // Δv equivalent of the remaining energy shortfall, for the taper:
         // dE = μ·da/(2a²), and prograde thrust adds energy at rate v·(T/m),
         // so dv_remaining ≈ μ·(r_t − a)/(2a²·v).
         const TAPER = 2.5; // s; spool τ = 0.4 s tracks this comfortably
         const minPeri = sim.body.radius + (sim.body.atmosphere?.topAltitude ?? 0) + 20_000;
-        const speed = norm(sim.state.v);
         const dvE =
           el.a > 0 && el.a < this.plan.targetRadius
             ? (sim.body.mu * (this.plan.targetRadius - el.a)) / (2 * el.a * el.a * speed)
