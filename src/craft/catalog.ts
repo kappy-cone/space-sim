@@ -37,6 +37,24 @@ export interface FinShape {
   thickness: number;
 }
 
+/** Wing planform: root chord, tip chord [m], FULL tip-to-tip span [m]
+ * (a wing part is the whole pair — the planar sim has no roll axis to
+ * tell halves apart), leading-edge sweep (root LE → tip LE axial offset
+ * [m], toward the tail), fixed incidence [rad] relative to the body
+ * axis, Oswald efficiency e, section Cl_max and profile Cd₀.
+ * controlFraction = cf/c > 0 makes it an elevator-bearing surface. */
+export interface WingShape {
+  cr: number;
+  ct: number;
+  span: number;
+  sweep: number;
+  incidence: number;
+  e: number;
+  clMax: number;
+  cd0: number;
+  controlFraction?: number;
+}
+
 /** Generic deploy state: one mechanism for fairings, nozzle extensions,
  * and future deployables — state + mass delta + reversible flag; the
  * `effect` keys the system that reads it. */
@@ -104,6 +122,9 @@ export interface PartDef {
   /** Fin planform; when set, render/pick as a fin and mount flush on the
    * parent surface instead of standing off by maxRadius. */
   fin?: FinShape;
+  /** Lifting-surface planform (plane class). Chord runs down the stack
+   * axis from the part's top (leading edge), like fins. */
+  wing?: WingShape;
   /** Reaction-control torque authority [N·m] this part contributes
    * (cold-gas RCS class — Draco-couple order of magnitude; estimates). */
   rcsTorque?: number;

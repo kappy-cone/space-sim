@@ -101,6 +101,43 @@ export interface PhasePlan {
   groups: BurnGroup[];
 }
 
+/** One lifting surface (a full wing pair or tailplane — planar 3-DOF).
+ * Precompiled from the wing part: geometry resolved to the numbers the
+ * force model needs, so the deriv does no planform math. */
+export interface LiftingSurface {
+  /** Planform area [m²] (full pair). */
+  S: number;
+  /** Aspect ratio span²/S (full span). */
+  AR: number;
+  /** Finite-wing lift slope [1/rad] (aero.liftSlope). */
+  a: number;
+  /** Oswald efficiency (induced drag). */
+  e: number;
+  /** Fixed incidence [rad]: chord angle relative to the body axis. */
+  incidence: number;
+  /** Quarter-MAC height in stack coordinates [m] (force application). */
+  y: number;
+  clMax: number;
+  cd0: number;
+  /** Elevator effectiveness τ (aero.flapEffectiveness) — only on
+   * control-surface-bearing tails; absent = fixed surface. */
+  tau?: number;
+  /** Tail-only: (1 − dε/dα) downwash factor on the α response. */
+  downwash?: number;
+}
+
+/** Plane-class aero aggregate. ABSENT on every rocket — its presence is
+ * the single gate for all plane physics, so rockets execute the exact
+ * pre-plane instruction sequence (the golden fixtures pin this). */
+export interface PlaneAero {
+  surfaces: LiftingSurface[];
+  /** Mean aerodynamic chord of the largest wing [m] (static margin unit). */
+  mac: number;
+  /** Elevator throw limit [rad]. ±25° — typical transport elevator
+   * deflection range (ESTIMATE; class value). */
+  elevMax: number;
+}
+
 export interface Vehicle {
   /** stages[0] burns first (bottom of the stack). */
   stages: Stage[];
@@ -141,6 +178,9 @@ export interface Vehicle {
   sepMass?: number[];
   /** Stage k is a strap-on burning in parallel with the sustainer. */
   strapOn?: boolean[];
+  /** Plane-class lifting surfaces + trim authority. Absent for rockets
+   * (the gate for all plane physics). */
+  planeAero?: PlaneAero;
 }
 
 /** Thrust-curve multiplier for a solid at burn fraction x (0 = full

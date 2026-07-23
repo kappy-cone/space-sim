@@ -31,6 +31,7 @@ import { FlightState, rk4Step } from './integrator';
 import { Elements, elementsFromState, propagateKepler } from './kepler';
 import { MassProperties, massProperties, synthesizeGeometry } from './massmodel';
 import { machDragFactor, speedOfSound } from './atmosphere';
+import { stallAngle, surfaceCoefficients } from './aero';
 import { Vec2, add, cross, dot, norm, perp, scale, sub, vec, fromAngle } from './vec2';
 import {
   Vehicle,
@@ -148,6 +149,14 @@ export class Sim {
   q = 0;
   aoa = 0;
   mach = 0;
+  // Plane-class readouts (inert for rockets: no surfaces ⇒ never set).
+  /** Commanded elevator deflection [rad] (per-step, gimbal pattern). */
+  elevator = 0;
+  /** Smallest (α_stall − |α_local|) over the lifting surfaces [rad]. */
+  stallMargin = Infinity;
+  stalled = false;
+  /** 1-g level-flight stall speed at current mass/altitude [m/s]. */
+  stallSpeed = Infinity;
   // Δv loss accounting [m/s].
   idealDv = 0;
   gravityLoss = 0;
@@ -503,6 +512,9 @@ export class Sim {
       this.q = 0;
       this.aoa = 0;
       this.mach = 0;
+      this.stallMargin = Infinity;
+      this.stalled = false;
+      this.stallSpeed = Infinity;
       this.checkOrbit();
       if (this.crashed) break;
     }
@@ -877,6 +889,29 @@ export class Sim {
       this.gimbal = 0;
     }
     let residual = wantTorque - gimbalTorque;
+    // Elevator (plane class): ΔCl at the tail arm, computed per-step and
+    // held through the RK4 step — the gimbal pattern, no actuator state.
+    // Authority is probed NUMERICALLY from the same force function the
+    // derivative uses (torque slope over a small δe), so the allocator
+    // and the applied physics can never disagree about sign or stall.
+    this.elevator = 0;
+    const pa = this.vehicle.planeAero;
+    if (pa && this.q > 1 && pa.surfaces.some((sf) => sf.tau)) {
+      const airNow = this.airspeedVec;
+      const speedNow = norm(airNow);
+      if (speedNow > 0.1) {
+        const axisNow = fromAngle(this.state.theta);
+        const dirNow = Math.sign(cross(this.state.r, this.state.v)) || 1;
+        const dProbe = 0.01;
+        const t0 = this.planeSurfaceForces(airNow, speedNow, this.q, axisNow, props.yCoM, 0, 0, dirNow).torque;
+        const t1 = this.planeSurfaceForces(airNow, speedNow, this.q, axisNow, props.yCoM, 0, dProbe, dirNow).torque;
+        const perRad = (t1 - t0) / dProbe;
+        if (Math.abs(perRad) > 1e-9) {
+          this.elevator = Math.max(-pa.elevMax, Math.min(pa.elevMax, residual / perRad));
+          residual -= perRad * this.elevator;
+        }
+      }
+    }
     // Active fins: authority scales with dynamic pressure (previous step's
     // q — one frame of lag is far inside the PD's bandwidth).
     const finMax = (this.vehicle.finControlPerQ ?? 0) * this.q;
@@ -915,6 +950,9 @@ export class Sim {
     const gimbal = this.gimbal;
     const chutes = this.activeChutes();
     const yCoM = props.yCoM;
+    const hasSurfaces = (this.vehicle.planeAero?.surfaces.length ?? 0) > 0;
+    const elevator = this.elevator;
+    const flightDir = Math.sign(cross(this.state.r, this.state.v)) || 1;
 
     const deriv = (s: FlightState) => {
       const rn = norm(s.r);
@@ -950,6 +988,11 @@ export class Sim {
             torque += N * (props.yCoP - yCoM);
             torque -= ((q * refA) / Math.max(speed, 20)) * props.dampingSum * s.omega;
           }
+          if (hasSurfaces) {
+            const pf = this.planeSurfaceForces(air, speed, q, axis, yCoM, s.omega, elevator, flightDir);
+            acc = add(acc, scale(pf.F, 1 / s.m));
+            torque += pf.torque;
+          }
         }
       }
       return { dv: acc, domega: torque / props.inertia, dm: -mdot };
@@ -972,6 +1015,24 @@ export class Sim {
     this.q = 0.5 * rho * speed * speed;
     this.mach = atm && this.altitude < 90_000 ? speed / speedOfSound(Math.max(0, this.altitude)) : 0;
     this.aoa = speed > 1 ? Math.atan2(cross(air, this.bodyAxis), dot(air, this.bodyAxis)) : 0;
+    // Plane readouts: worst-surface stall margin at the current AoA, and
+    // the 1-g stall speed √(2·m·g/(ρ·ΣS·Cl_max)) (level-flight force
+    // balance — Anderson, Aircraft Performance and Design, §5.3.1).
+    const paRead = this.vehicle.planeAero;
+    if (paRead && paRead.surfaces.length > 0) {
+      let margin = Infinity;
+      let sumSCl = 0;
+      for (const sf of paRead.surfaces) {
+        const alpha = this.aoa * (sf.downwash ?? 1) - flightDir * (sf.incidence + (sf.tau ? sf.tau * this.elevator : 0));
+        margin = Math.min(margin, stallAngle(sf.clMax, sf.a) - Math.abs(alpha));
+        sumSCl += sf.S * sf.clMax;
+      }
+      this.stallMargin = margin;
+      this.stalled = margin < 0;
+      const rn = norm(this.state.r);
+      const gLocal = this.body.mu / (rn * rn);
+      this.stallSpeed = rho > 0 && sumSCl > 0 ? Math.sqrt((2 * this.state.m * gLocal) / (rho * sumSCl)) : Infinity;
+    }
     this.checkStructure();
 
     // Pool drains (RK4's dm already took the mass), boiloff, settling.
@@ -985,6 +1046,58 @@ export class Sim {
     const soi = this.soiTarget(this.state.r, this.state.t);
     if (soi && !this.crashed) this.reReference(soi);
     return dt;
+  }
+
+  /**
+   * Total lifting-surface force [N] and torque [N·m] at a flow state
+   * (plane class; rockets have no surfaces and never get here). ONE
+   * implementation shared by the RK4 derivative and the Δv-accounting
+   * integrands so the two can never drift apart. Lift acts ⊥ airflow
+   * (positive Cl along +perp(âir) — the same sign convention as the
+   * Barrowman normal force), drag ∥ −airflow, both applied at the
+   * surface's quarter-MAC height (the parachute-riser torque pattern).
+   */
+  private planeSurfaceForces(
+    air: Vec2,
+    speed: number,
+    q: number,
+    axis: Vec2,
+    yCoM: number,
+    omega: number,
+    elevator: number,
+    dir: number,
+  ): { F: Vec2; torque: number } {
+    const surfaces = this.vehicle.planeAero!.surfaces;
+    const aoa = Math.atan2(cross(air, axis), dot(air, axis));
+    const aHat = scale(air, 1 / speed);
+    const nHat = perp(aHat);
+    let Fx = 0;
+    let Fy = 0;
+    let torque = 0;
+    for (const s of surfaces) {
+      // Local α: vehicle AoA through the downwash factor (tails), plus
+      // fixed incidence and the elevator's camber change. The sim's AoA
+      // sign is CCW-positive, so "rotated toward the sky" is a NEGATIVE
+      // offset when flying prograde and positive retrograde — dir =
+      // sign(r × v), the same downrange convention the pitch command
+      // uses. Without it a wing would push the nose down on one heading
+      // and up on the other.
+      const alpha = aoa * (s.downwash ?? 1) - dir * (s.incidence + (s.tau ? s.tau * elevator : 0));
+      const { cl, cd } = surfaceCoefficients(alpha, s.a, s.AR, s.e, s.clMax, s.cd0);
+      const L = q * s.S * cl;
+      const D = q * s.S * cd;
+      const fx = nHat.x * L - aHat.x * D;
+      const fy = nHat.y * L - aHat.y * D;
+      Fx += fx;
+      Fy += fy;
+      const armY = s.y - yCoM;
+      torque += armY * (axis.x * fy - axis.y * fx);
+      // Per-surface pitch damping — the finite-wing analogue of the
+      // body dampingSum term (tail/wing C_mq contribution: q·a·S·arm²·ω/V,
+      // Etkin & Reid, Dynamics of Flight, §5.5).
+      torque -= ((q * s.a * s.S) / Math.max(speed, 20)) * armY * armY * omega;
+    }
+    return { F: vec(Fx, Fy), torque };
   }
 
   /** Integrands of the Δv budget at the current state (thrust fixed). */
@@ -1020,6 +1133,11 @@ export class Sim {
           const axis = fromAngle(s.theta);
           const aoa = Math.atan2(cross(air, axis), dot(air, axis));
           F = add(F, scale(perp(axis), q * this.geom.refArea * props.cnAlpha * Math.sin(aoa)));
+        }
+        if ((this.vehicle.planeAero?.surfaces.length ?? 0) > 0) {
+          const dir = Math.sign(cross(s.r, s.v)) || 1;
+          const pf = this.planeSurfaceForces(air, speed, q, fromAngle(s.theta), props.yCoM, s.omega, this.elevator, dir);
+          F = add(F, pf.F);
         }
         aeroAlong = -dot(F, vHat) / s.m; // positive = loss
       }

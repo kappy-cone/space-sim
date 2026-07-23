@@ -39,6 +39,7 @@ import {
 import {
   BurnGroup,
   EngineGroup,
+  LiftingSurface,
   PhasePlan,
   PropellantPool,
   Stage,
@@ -48,7 +49,8 @@ import {
   phaseWalkReport,
   totalDeltaV,
 } from '../physics/vehicle';
-import { partById } from './catalog';
+import { ELEV_MAX, downwashDerivative, flapEffectiveness, liftSlope, meanAeroChord } from '../physics/aero';
+import { WingShape, partById } from './catalog';
 import { Craft, CraftPart, children, instanceCount, placements } from './craft';
 
 export interface FairingInfo {
@@ -341,7 +343,7 @@ export function compile(craft: Craft): Compiled {
   // ---- geometry + Barrowman + enclosure ----
   let refR = 0.1;
   for (const pl of place.values()) {
-    if (pl.instances[0] && Math.hypot(pl.instances[0].x, pl.instances[0].z) < 1e-6 && !pl.def.fin) {
+    if (pl.instances[0] && Math.hypot(pl.instances[0].x, pl.instances[0].z) < 1e-6 && !pl.def.fin && !pl.def.wing) {
       refR = Math.max(refR, pl.def.maxRadius);
     }
   }
@@ -400,6 +402,9 @@ export function compile(craft: Craft): Compiled {
         const area = ((def.fin.cr + def.fin.ct) / 2) * def.fin.span;
         finControlPerQ += n * area * 2 * Math.sin((20 * Math.PI) / 180);
       }
+    } else if (def.wing) {
+      // Lifting surface: carried by planeAero (finite-wing model), not
+      // the Barrowman body walk — a wing is not a body of revolution.
     } else if (def.kind !== 'engine') {
       let rAbove = 0;
       if (p.attach.kind === 'below' && p.parentId) {
@@ -487,7 +492,7 @@ export function compile(craft: Craft): Compiled {
     let frontCd = CD_BLUNT;
     for (const [id, pl] of place) {
       if (burnIndexOf(id) < si) continue;
-      if (pl.def.fin) continue;
+      if (pl.def.fin || pl.def.wing) continue; // thin surfaces: profile drag lives in cd0/planeAero
       if (faired && enclosed.has(id)) continue;
       if (!faired && pl.def.fairing) continue;
       const inst0 = pl.instances[0]!;
@@ -507,6 +512,68 @@ export function compile(craft: Craft): Compiled {
     areaFaired: compiled.map((_s, i) => dragFor(i, true).area),
     areaBare: compiled.map((_s, i) => dragFor(i, false).area),
   };
+
+  // ---- plane-class lifting surfaces ----
+  // The CLASS gates, not the parts: any 'plane' craft gets planeAero
+  // (wingless planes just carry no surfaces), and no rocket ever does —
+  // that absence is what keeps rocket physics byte-identical.
+  let planeAero: Vehicle['planeAero'];
+  if (craft.vehicleClass === 'plane') {
+    interface WingAt {
+      w: WingShape;
+      y: number;
+      pairS: number;
+      total: number; // pairS × instances — size ranking
+      n: number;
+    }
+    const wings: WingAt[] = [];
+    for (const [id, pl] of place) {
+      const w = pl.def.wing;
+      if (!w) continue;
+      // Quarter-MAC application point. Chord runs down the stack axis from
+      // the part top (leading edge — fin convention); the MAC sits at
+      // spanwise station η = (cr + 2ct)/(3(cr + ct)) (trapezoid centroid,
+      // Raymer §4.2), swept back by sweep·η, and the force acts at MAC/4.
+      const inst0 = pl.instances[0]!;
+      const mac = meanAeroChord(w.cr, w.ct);
+      const eta = (w.cr + 2 * w.ct) / (3 * (w.cr + w.ct));
+      const y = inst0.y + w.cr - (w.sweep * eta + mac / 4);
+      const pairS = ((w.cr + w.ct) / 2) * w.span;
+      const n = instanceCount(craft, id);
+      wings.push({ w, y, pairS, total: pairS * n, n });
+    }
+    const main = wings.reduce<WingAt | null>((best, x) => (x.total > (best?.total ?? -1) ? x : best), null);
+    const mainAr = main ? (main.w.span * main.w.span) / main.pairS : 0;
+    const mainSlope = main ? liftSlope(mainAr, main.w.e) : 0;
+    const surfaces: LiftingSurface[] = wings.map((x) => {
+      const ar = (x.w.span * x.w.span) / x.pairS;
+      const s: LiftingSurface = {
+        S: x.total,
+        AR: ar,
+        a: liftSlope(ar, x.w.e),
+        e: x.w.e,
+        incidence: x.w.incidence,
+        y: x.y,
+        clMax: x.w.clMax,
+        cd0: x.w.cd0,
+      };
+      if (x.w.controlFraction) s.tau = flapEffectiveness(x.w.controlFraction);
+      // Surfaces mounted aft of the main wing sit in its downwash and
+      // respond to α with the (1 − dε/dα) factor; fore surfaces
+      // (canards) don't (Nelson eq. 2.23).
+      if (main && x !== main && x.y < main.y) {
+        s.downwash = 1 - downwashDerivative(mainSlope, mainAr);
+      }
+      return s;
+    });
+    planeAero = {
+      surfaces,
+      // Static-margin unit: the main wing's MAC. A wingless plane has no
+      // meaningful MAC; 1 m keeps the readout finite until wings exist.
+      mac: main ? meanAeroChord(main.w.cr, main.w.ct) : 1,
+      elevMax: ELEV_MAX,
+    };
+  }
 
   const vehicle: Vehicle = {
     stages: phaseStages,
@@ -538,6 +605,7 @@ export function compile(craft: Craft): Compiled {
     phases,
     drag,
     ullageMotors,
+    planeAero,
   };
 
   const reports = vehicle.stages.map((_s, i) => stageReport(vehicle, i));

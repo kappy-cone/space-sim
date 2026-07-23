@@ -203,6 +203,41 @@ export function finSet(
   return { cn: cnBare * K, xFromRootLE };
 }
 
+export interface PlaneStability {
+  /** Neutral point height in stack coordinates [m]. */
+  yNP: number;
+  /** Static margin as % of the main wing's MAC; positive = NP aft of
+   * CoM = stable. The plane-class analogue of caliber margin — never
+   * show a plane calibers, never show a rocket %MAC. */
+  staticMarginPctMAC: number;
+}
+
+/**
+ * Plane-class neutral point: the same Σ(slope·area·position)/Σ(slope·area)
+ * aggregation as Barrowman, extended with the finite-wing surfaces. Wing
+ * a·S and body C_Nα·refArea share units [m²/rad], so they compose
+ * directly; tail surfaces respond to α through their (1 − dε/dα)
+ * downwash factor (Nelson §2.3 — the classic neutral-point sum).
+ */
+export function planeStability(
+  props: MassProperties,
+  refArea: number,
+  aero: import('./vehicle').PlaneAero,
+): PlaneStability {
+  let W = props.cnAlpha > 0 ? props.cnAlpha * refArea : 0;
+  let Wy = props.cnAlpha > 0 ? props.cnAlpha * refArea * props.yCoP : 0;
+  for (const s of aero.surfaces) {
+    const aEff = s.a * (s.downwash ?? 1);
+    W += aEff * s.S;
+    Wy += aEff * s.S * s.y;
+  }
+  const yNP = W > 0 ? Wy / W : NaN;
+  return {
+    yNP,
+    staticMarginPctMAC: W > 0 ? (100 * (props.yCoM - yNP)) / aero.mac : NaN,
+  };
+}
+
 /**
  * Fallback geometry for vehicles built directly from Stage[] data (tests,
  * hand-rolled vehicles): stages stacked as cylinders sized from propellant

@@ -5,4 +5,9 @@ import { defineConfig } from 'vite';
 // falls back to Vite's default 5173.
 export default defineConfig({
   server: { port: Number(process.env.PORT) || 5173 },
+  test: {
+    // Agent worktrees live under .claude/ — testing them from the parent
+    // checkout double-runs every suite and sweeps in scratch files.
+    exclude: ['**/node_modules/**', '.claude/**'],
+  },
 });

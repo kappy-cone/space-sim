@@ -34,6 +34,10 @@ export interface Craft {
   /** Stage firing order as section indices (see compile.ts); reordered
    * by the staging list UI. */
   stageOrder: number[];
+  /** Vehicle class, chosen at build start. Absent = 'rocket', so every
+   * previously saved craft loads (and compiles) exactly as before. The
+   * class — not the parts — gates plane aero at compile. */
+  vehicleClass?: 'rocket' | 'plane';
 }
 
 let counter = 0;
