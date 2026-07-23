@@ -1852,7 +1852,7 @@ export class Flight3D {
  * (two short GL_LINES segments) so it reads at any zoom. Deterministic
  * (seeded LCG) so the sky is stable frame to frame — rendering may use
  * randomness, but a stable field looks better than a twinkling one. */
-function buildStarfield(n: number): Float32Array {
+export function buildStarfield(n: number): Float32Array {
   let seed = 0x1234_5678;
   const rnd = (): number => {
     seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;

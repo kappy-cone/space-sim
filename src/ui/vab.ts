@@ -146,6 +146,7 @@ export class Vab {
     private world: WorldState,
     private saveWorld: () => void,
     private onDogfight?: () => void,
+    private onWorld?: () => void,
   ) {
     const saved = localStorage.getItem(STORAGE_KEY);
     this.craft = saved ? deserialize(saved) : referenceCraft();
@@ -668,10 +669,12 @@ export class Vab {
       ${this.plannerHtml()}
       <button class="primary launch-btn" ${c.blockers.length > 0 ? 'disabled' : ''}>${c.blockers.length > 0 ? 'Cannot fly' : 'Launch ▸'}</button>
       <button class="program-btn" style="width:100%;margin-top:6px">Program ▸</button>
+      <button class="world-btn" style="width:100%;margin-top:6px">World viewer ▸</button>
       <button class="dogfight-btn" style="width:100%;margin-top:6px">Dogfight ▸</button>`;
     this.statsEl.querySelector<HTMLButtonElement>('.launch-btn')!.onclick = () => this.launchDialog();
     this.statsEl.querySelector<HTMLButtonElement>('.program-btn')!.onclick = () =>
       new TrackingView(this.root, this.world, this.saveWorld);
+    this.statsEl.querySelector<HTMLButtonElement>('.world-btn')!.onclick = () => this.onWorld?.();
     this.statsEl.querySelector<HTMLButtonElement>('.dogfight-btn')!.onclick = () => this.onDogfight?.();
     const sel = this.statsEl.querySelector<HTMLSelectElement>('.planner-n');
     if (sel) {
