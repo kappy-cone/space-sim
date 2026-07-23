@@ -24,8 +24,9 @@ describe('release compile split', () => {
     expect(c.vehicle.pools![k]!.mass).toBe(0);
     // …and its separation mass is EXACTLY the sub-vehicle's wet mass.
     expect(c.vehicle.sepMass![k]!).toBeCloseTo(massFromStage(rel.sub.vehicle, 0), 6);
-    // The dart's own staging survived the re-root: booster + ramjet stage.
-    expect(rel.sub.stages.length).toBe(2);
+    // The re-rooted payload is the single-stage guided solid missile.
+    expect(rel.sub.stages.length).toBe(1);
+    expect(rel.sub.vehicle.stages[0]!.engines[0]!.engine.id).toBe('mk36');
     // The carrier's engines are NOT in the released phase's burn groups…
     const phase = c.vehicle.phases![k]!;
     expect(phase.groups.every((g) => g.stage !== k)).toBe(true);

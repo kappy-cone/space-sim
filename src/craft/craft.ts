@@ -229,15 +229,15 @@ export function starterCrafts(): { name: string; craft: Craft }[] {
   airl.P('wing', 'wing-swept', 'fus', { kind: 'radial', angle: 0, y: 6.2 });
   airl.P('tail', 'tailplane', 'fus', { kind: 'radial', angle: 0, y: 0.4 });
   airl.P('gear', 'gear-retract', 'fus', { kind: 'radial', angle: Math.PI, y: 2 });
+  // The weapon: a guided solid-rocket missile (AIM-9 Sidewinder class) —
+  // faster (M2.5+ on the Mk 36 motor, where the old J79/ramjet dart was
+  // heavier and jet-bound) and far lighter (~85 kg vs the J79's 1.7 t
+  // alone). Guidance (proportional navigation) is flown in the dogfight
+  // model, src/combat/; on the release pylon it drops as a live rocket.
   airl.P('pylon', 'pylon-release', 'fus', { kind: 'radial', angle: Math.PI, y: 8 });
-  airl.P('dart-nose', 'nose-12', 'pylon', { kind: 'below' });
-  airl.P('dart-tank2', 'jf12', 'dart-nose', { kind: 'below' }, 1, 1.5);
-  airl.P('dart-ram', 'e-rj43', 'dart-tank2', { kind: 'below' });
-  airl.P('dart-fins2', 'fin-s', 'dart-tank2', { kind: 'radial', angle: 0.5, y: 0.3 }, 4);
-  airl.P('dart-dec', 'dec-12', 'dart-ram', { kind: 'below' });
-  airl.P('dart-tank1', 'jf12', 'dart-dec', { kind: 'below' }, 1, 2);
-  airl.P('dart-jet', 'e-j79', 'dart-tank1', { kind: 'below' });
-  airl.P('dart-fins1', 'fin-s', 'dart-tank1', { kind: 'radial', angle: 0.2, y: 0.4 }, 4);
+  airl.P('mseek', 'msl-seeker', 'pylon', { kind: 'below' });
+  airl.P('mmot', 'msl-motor', 'mseek', { kind: 'below' });
+  airl.P('mfin', 'msl-fin', 'mmot', { kind: 'radial', angle: 0.5, y: 0.9 }, 4);
 
   gull.craft.vehicleClass = 'plane';
   strato.craft.vehicleClass = 'plane';

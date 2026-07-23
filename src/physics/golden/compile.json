@@ -744,10 +744,10 @@
    {
     "deltaV": 0,
     "deltaVSeaLevel": 0,
-    "twrIgnition": 0.4018534241097265,
-    "twrBurnout": 0.4018534241097265,
-    "ignitionMass": 61003.56858604968,
-    "burnoutMass": 61003.56858604968,
+    "twrIgnition": 0.44065639349364005,
+    "twrBurnout": 0.44065639349364005,
+    "ignitionMass": 55631.764978738305,
+    "burnoutMass": 55631.764978738305,
     "burnTime": 0,
     "propellantMass": 0
    },
@@ -764,14 +764,14 @@
   ],
   "aero": {
    "full": {
-    "cnAlpha": 3.9452534942302355,
-    "yCoP": 13.383668411312305,
-    "staticMarginCal": -1.3242108057106616
+    "cnAlpha": 2.191115529951183,
+    "yCoP": 14.015739634136716,
+    "staticMarginCal": -2.546706638024975
    },
    "empty": {
-    "cnAlpha": 3.9452534942302355,
-    "yCoP": 13.383668411312305,
-    "staticMarginCal": -1.2860075384481884
+    "cnAlpha": 2.191115529951183,
+    "yCoP": 14.015739634136716,
+    "staticMarginCal": -2.5471525463943627
    }
   },
   "drag": {
@@ -793,7 +793,7 @@
    ]
   },
   "sepMass": [
-   5452.803607311376,
+   81,
    21169.17497785161
   ],
   "strapOn": [

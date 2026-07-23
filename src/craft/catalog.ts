@@ -594,6 +594,41 @@ export const PARTS: readonly PartDef[] = [
     radialParent: false,
     radialChild: false,
   }),
+  // ---- guided-missile parts (AIM-9 Sidewinder class) ----
+  // A missile is built like any craft: seeker + motor + fins. Its
+  // numbers feed the dogfight model (src/combat/); the guidance law
+  // (proportional navigation) lives there, not in the orbital sim.
+  def({
+    id: 'msl-seeker',
+    name: 'IR Seeker + Warhead',
+    kind: 'payload',
+    segments: [fru(0.13, 0.02, 0.5)],
+    color: [0.75, 0.7, 0.62],
+    dryMass: 30, // guidance section + WDU-17 warhead class (~9.4 kg) + fuze
+    source:
+      'AIM-9 guidance/warhead section class (~30 kg of the ~85 kg round; WDU-17 warhead ~9.4 kg published) — combined mass ESTIMATE',
+    noseCd: 0.2, // slender ogive seeker dome (Hoerner class)
+    satFunc: undefined,
+    stackTop: false,
+    stackBottom: true,
+    radialParent: true,
+    radialChild: true,
+  }),
+  def({
+    id: 'msl-motor',
+    name: 'Mk 36 Missile Motor',
+    kind: 'engine',
+    segments: [cyl(0.13, 1.8)],
+    color: [0.4, 0.42, 0.46],
+    dryMass: 0, // motor case inert is on the roster engine (12 kg)
+    propellant: 35, // cast grain — see the mk36 roster entry
+    source: 'AIM-9 Sidewinder Mk 36 class (see physics/parts.ts); 0.127 m airframe geometry approximate',
+    solidMotor: 'mk36',
+    stackTop: true,
+    stackBottom: false,
+    radialParent: true,
+    radialChild: true,
+  }),
   def({
     id: 'fairing-24',
     name: 'Payload Fairing 2.4 m',
@@ -717,6 +752,7 @@ export const PARTS: readonly PartDef[] = [
     deploy: { label: 'Deploy parachute', reversible: false, massDelta: 0, effect: 'chutes' },
   }),
   // ---- fins (aluminum-plate mass estimate: planform area × t × 2700) ----
+  finDef('msl-fin', 'Missile Fin', { cr: 0.25, ct: 0.12, span: 0.18, sweep: 0.12, thickness: 0.008 }),
   finDef('fin-s', 'Fin S', { cr: 0.8, ct: 0.4, span: 0.55, sweep: 0.3, thickness: 0.012 }),
   finDef('fin-m', 'Fin M', { cr: 1.6, ct: 0.8, span: 1.1, sweep: 0.6, thickness: 0.02 }),
   finDef('fin-l', 'Fin L', { cr: 2.6, ct: 1.3, span: 1.7, sweep: 1.0, thickness: 0.03 }),

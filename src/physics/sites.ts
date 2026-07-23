@@ -108,6 +108,39 @@ export const SITES: readonly Site[] = [
     corridor: 'west',
     startsDiscovered: false,
   },
+  // Far-side theater — a second complex on the opposite hemisphere
+  // (~antipodal to the Cape). Two opposing runways host the air-launch
+  // fighter teams for the dogfight (src/combat/); a pad rounds out the
+  // base. Discoverable like every other site past the home complex.
+  {
+    id: 'far-base',
+    body: 'earth',
+    name: 'Meridian Base (far side)',
+    angle: Math.PI,
+    type: 'pad',
+    corridor: 'both',
+    startsDiscovered: false,
+  },
+  {
+    id: 'far-runway-a',
+    body: 'earth',
+    name: 'Meridian Runway A',
+    angle: Math.PI - 20_000 / R,
+    type: 'runway',
+    halfLength: 2_000,
+    corridor: 'both',
+    startsDiscovered: false,
+  },
+  {
+    id: 'far-runway-b',
+    body: 'earth',
+    name: 'Meridian Runway B',
+    angle: Math.PI + 20_000 / R,
+    type: 'runway',
+    halfLength: 2_000,
+    corridor: 'both',
+    startsDiscovered: false,
+  },
 ];
 
 export const siteById = (id: string): Site => {

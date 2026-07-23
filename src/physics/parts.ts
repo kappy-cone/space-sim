@@ -301,6 +301,37 @@ export const ENGINES: readonly Engine[] = [
       [1, 0],
     ],
   },
+  {
+    id: 'mk36',
+    name: 'Mk 36 rocket motor (solid)',
+    propellant: 'solid',
+    // Air-to-air missile boost motor (AIM-9 Sidewinder class). The whole
+    // point of the re-engine: a rocket, not a jet — it reaches M2.5+
+    // where a light turbojet is stuck subsonic. Rated thrust from
+    // impulse: 35 kg grain × g₀ × 235 s / 5.0 s ≈ 16.1 kN.
+    thrustSL: 15_600, // SL ≈ vac × (228/235) — low-expansion tactical nozzle
+    thrustVac: 16_100,
+    ispSL: 228,
+    ispVac: 235, // small reduced-smoke solid class — ESTIMATE within range
+    mass: 12, // motor case + nozzle inert — ESTIMATE (Sidewinder motor class)
+    vacuumOnly: false,
+    source:
+      'AIM-9 Sidewinder Mk 36 class boost motor: burnout M2.5+ published; grain 35 kg / burn ~5 s / Isp 235 s ESTIMATED within reduced-smoke tactical-solid ranges (Zarchan, Tactical and Strategic Missile Guidance; public Sidewinder data). Sea-level-capable low-expansion nozzle.',
+    throttleable: false,
+    minThrottle: 1,
+    ignitions: 1,
+    gimbalDeg: 0, // spin-stabilized / fin-controlled, not TVC
+    expansionRatio: 5, // sea-level tactical nozzle — ESTIMATE
+    maxAmbientPressure: Infinity,
+    ullageImmune: true,
+    // Boost motor: near-flat then sharp tail-off (reduced-smoke grain).
+    thrustCurve: [
+      [0, 1.1],
+      [0.1, 1.15],
+      [0.85, 1.0],
+      [1, 0],
+    ],
+  },
   // ---------------- air-breathing (plane class) ----------------
   // Model: thrust = T_SL·(ρ/ρ₀)·f(M), ṁ = tsfc·T (fuel only — no
   // oxidizer aboard, which is the entire point: fuel-only Isp = 3600/TSFC
