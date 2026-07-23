@@ -46,13 +46,14 @@ import {
   Stage,
   StageReport,
   Vehicle,
+  massFromStage,
   stageReport,
   phaseWalkReport,
   totalDeltaV,
 } from '../physics/vehicle';
 import { ELEV_MAX, downwashDerivative, flapEffectiveness, liftSlope, meanAeroChord } from '../physics/aero';
 import { WingShape, partById } from './catalog';
-import { Craft, CraftPart, children, instanceCount, placements } from './craft';
+import { Craft, CraftPart, children, instanceCount, placements, subCraftFrom } from './craft';
 
 export interface FairingInfo {
   partId: string;
@@ -69,6 +70,8 @@ export interface CompiledStage {
    * the sustainer core. */
   strapOn: boolean;
   crossfeed: boolean;
+  /** Release-pylon subtree: separation spawns it as a live vessel. */
+  released?: boolean;
 }
 
 export interface Compiled {
@@ -82,6 +85,9 @@ export interface Compiled {
   fairings: FairingInfo[];
   /** Stability at liftoff (full) and with the first stage dry. */
   aero: { full: MassProperties; empty: MassProperties };
+  /** Air-launch payloads: pre-compiled released subtrees, ready to spawn
+   * as their own vessels at the release staging event. */
+  released?: { pylonId: string; sectionBurnIndex: number; sub: Compiled; subCraft: Craft; name: string }[];
 }
 
 /** Commonly cited Δv to LEO: ~7.8 km/s orbital + 1.5–2.0 km/s losses
@@ -107,21 +113,42 @@ export function compile(craft: Craft): Compiled {
   const section = new Map<string, number>();
   const strapOnSec = new Set<number>();
   const crossfeedSec = new Set<number>();
+  const releasedSec = new Set<number>(); // release-pylon subtrees (air launch)
+  const releasePylons = new Map<number, string>(); // released section → pylon part id
   const pylonParent = new Map<number, number>(); // strap-on section → sustainer section
   let maxSection = 0;
-  const walk = (p: CraftPart, depth: number): void => {
+  const walk = (p: CraftPart, depth: number, released: boolean): void => {
     const def = partById(p.defId);
-    const d = def.kind === 'decoupler' ? depth + 1 : depth;
-    if (def.kind === 'decoupler' && p.attach.kind === 'radial') {
+    if (def.release && !released) {
+      // Release pylon: the hooks stay with the carrier's section; the
+      // ENTIRE subtree below becomes ONE section (its internal staging
+      // belongs to its own compile after release, not the carrier's),
+      // flagged released AND strap-on — strap-on semantics give the
+      // carrier a parallel-burn phase (its engines run right through
+      // the release, sustainer-continuation included).
+      section.set(p.id, depth);
+      const d = depth + 1;
+      releasedSec.add(d);
+      releasePylons.set(d, p.id);
+      strapOnSec.add(d);
+      pylonParent.set(d, depth);
+      maxSection = Math.max(maxSection, d);
+      if (p.symmetry > 1) warnings.push('A release pylon with symmetry releases ONE vessel — set symmetry 1.');
+      for (const c of children(craft, p.id)) walk(c, d, true);
+      return;
+    }
+    const d = released ? depth : def.kind === 'decoupler' ? depth + 1 : depth;
+    if (!released && def.kind === 'decoupler' && p.attach.kind === 'radial') {
       strapOnSec.add(d);
       pylonParent.set(d, depth);
       if (def.crossfeed) crossfeedSec.add(d);
     }
     section.set(p.id, d);
     maxSection = Math.max(maxSection, d);
-    for (const c of children(craft, p.id)) walk(c, d);
+    for (const c of children(craft, p.id)) walk(c, d, released);
   };
-  walk(craft.parts[craft.rootId]!, 0);
+  const warnings: string[] = [];
+  walk(craft.parts[craft.rootId]!, 0, false);
 
   let order = [...Array(maxSection + 1).keys()].reverse();
   if (
@@ -165,10 +192,12 @@ export function compile(craft: Craft): Compiled {
 
   for (const p of Object.values(craft.parts)) {
     const def = partById(p.defId);
-    const sec = sections[section.get(p.id)!]!;
+    const secIdx = section.get(p.id)!;
+    const sec = sections[secIdx]!;
     const n = instanceCount(craft, p.id);
     const pl = place.get(p.id)!;
     sec.partIds.push(p.id);
+    if (releasedSec.has(secIdx)) continue; // lumped below via the sub-compile — engineless, poolless
     rcsTorque += (def.rcsTorque ?? 0) * n + (def.control?.rcsTorque ?? 0) * n;
     rcsThrust += (def.control?.rcsThrust ?? 0) * n;
     rcsPropellant += (def.control?.rcsPropellant ?? 0) * n;
@@ -227,7 +256,18 @@ export function compile(craft: Craft): Compiled {
     }
   }
 
-  const warnings: string[] = [];
+  // Released subtrees: compile each as its own vehicle and lump its
+  // EXACT wet mass into the carrier's section — mass conservation at
+  // release is by construction, not by estimate. The sub-compile also
+  // gives the spawned vessel its own stages/pools/geometry.
+  const released: { pylonId: string; sectionBurnIndex: number; sub: Compiled; subCraft: Craft; name: string }[] = [];
+  for (const [secIdx, pylonId] of releasePylons) {
+    const subCraft = subCraftFrom(craft, pylonId);
+    const sub = compile(subCraft);
+    sections[secIdx]!.stage.extraDryMass =
+      (sections[secIdx]!.stage.extraDryMass ?? 0) + massFromStage(sub.vehicle, 0);
+    released.push({ pylonId, sectionBurnIndex: order.indexOf(secIdx), sub, subCraft, name: subCraft.name });
+  }
 
   // Per-section fluid + pool bookkeeping. A section is solid-powered or
   // liquid; its liquid engines define the fluid the pool must carry.
@@ -276,6 +316,7 @@ export function compile(craft: Craft): Compiled {
     sectionIndex: si,
     strapOn: strapOnSec.has(si),
     crossfeed: crossfeedSec.has(si),
+    released: releasedSec.has(si),
   }));
 
   // Solid grain rides in the stage's tank list as a cast-grain entry so
@@ -715,6 +756,10 @@ export function compile(craft: Craft): Compiled {
     // Gear is a belly assembly (nose + main pairs along the axis) — its
     // render-side standoff is visual, the mass rides on-axis.
     if (def.kind === 'gear') continue;
+    // Release pylons + their payload: a belly pod's pitch moment is
+    // trimmed away in real practice (B-52 carriage) and its lateral
+    // offset is not modeled by the point-mass CoM — exempt, flagged.
+    if (def.release || releasedSec.has(section.get(id)!)) continue;
     const perInst = (def.dryMass + (def.propellant ?? 0)) * (instanceCount(craft, id) / pl.instances.length);
     for (const i of pl.instances) {
       offX += perInst * i.x;
@@ -732,7 +777,8 @@ export function compile(craft: Craft): Compiled {
     const def = partById(p.defId);
     const compact =
       def.kind === 'fin' || def.kind === 'chute' || def.kind === 'leg' || def.kind === 'control' ||
-      def.kind === 'wing' || def.kind === 'gear' || !!def.fairing; // wings/gear ARE their pair
+      def.kind === 'wing' || def.kind === 'gear' || !!def.fairing || // wings/gear ARE their pair
+      !!def.release; // a release pylon is a single belly mount by design
     if (p.attach.kind === 'radial' && p.symmetry === 1 && !compact) {
       warnings.push(`1× ${def.name} attached radially without symmetry — asymmetric.`);
     }
@@ -764,6 +810,7 @@ export function compile(craft: Craft): Compiled {
     geometry,
     fairings,
     aero,
+    released: released.length > 0 ? released : undefined,
   };
 }
 

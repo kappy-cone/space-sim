@@ -207,7 +207,14 @@ export class Sim {
 
   private geom;
 
-  constructor(vehicle: Vehicle, body: CelestialBody = EARTH, site?: Site) {
+  constructor(
+    vehicle: Vehicle,
+    body: CelestialBody = EARTH,
+    site?: Site,
+    /** Spawn mid-air at this state instead of pinned to a site — how a
+     * released vessel is born (air launch). */
+    seed?: { r: Vec2; v: Vec2; theta: number; omega: number; t: number },
+  ) {
     this.vehicle = vehicle;
     this.body = body;
     this.site = site ?? defaultSite(!!vehicle.planeAero);
@@ -224,8 +231,17 @@ export class Sim {
     // Fixed gear starts (and stays) down; retractable starts down on the
     // ground (you don't spawn gear-up on the pad/runway).
     this.gearDeployed = vehicle.gear !== undefined;
-    if (vehicle.planeAero) this.pinToRolling(); // runway: horizontal, nose downrange
-    else this.pinToSurface(); // launch pad: equator, +x, nose up
+    if (seed) {
+      // Born in flight: the releasing carrier hands over the exact state.
+      this.state = { r: seed.r, v: seed.v, theta: seed.theta, omega: seed.omega, m: this.state.m, t: seed.t };
+      this.landed = false;
+      this.gearDeployed = false; // dropped clean; deploy before touchdown
+      this.unsettledTime = 0; // carrier flight kept the tanks settled
+    } else if (vehicle.planeAero) {
+      this.pinToRolling(); // runway: horizontal, nose downrange
+    } else {
+      this.pinToSurface(); // launch pad: equator, +x, nose up
+    }
   }
 
   /** Propellant reachable by the current phase (own pool + crossfed). */

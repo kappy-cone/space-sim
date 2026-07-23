@@ -737,5 +737,80 @@
   ],
   "finControlPerQ": 0,
   "warnings": []
+ },
+ "Air Launcher": {
+  "totalDeltaV": 62489.75374139779,
+  "reports": [
+   {
+    "deltaV": 0,
+    "deltaVSeaLevel": 0,
+    "twrIgnition": 0.4018534241097265,
+    "twrBurnout": 0.4018534241097265,
+    "ignitionMass": 61003.56858604968,
+    "burnoutMass": 61003.56858604968,
+    "burnTime": 0,
+    "propellantMass": 0
+   },
+   {
+    "deltaV": 62489.75374139779,
+    "deltaVSeaLevel": 62489.75374139779,
+    "twrIgnition": 0.4412989259211709,
+    "twrBurnout": 1.158027790164948,
+    "ignitionMass": 55550.764978738305,
+    "burnoutMass": 21169.17497785161,
+    "burnTime": 9271.424189593678,
+    "propellantMass": 34381.590000886696
+   }
+  ],
+  "aero": {
+   "full": {
+    "cnAlpha": 3.9452534942302355,
+    "yCoP": 13.383668411312305,
+    "staticMarginCal": -1.3242108057106616
+   },
+   "empty": {
+    "cnAlpha": 3.9452534942302355,
+    "yCoP": 13.383668411312305,
+    "staticMarginCal": -1.2860075384481884
+   }
+  },
+  "drag": {
+   "cdFaired": [
+    0.4,
+    0.4
+   ],
+   "cdBare": [
+    0.4,
+    0.4
+   ],
+   "areaFaired": [
+    15.975077183320442,
+    15.975077183320442
+   ],
+   "areaBare": [
+    15.975077183320442,
+    15.975077183320442
+   ]
+  },
+  "sepMass": [
+   5452.803607311376,
+   21169.17497785161
+  ],
+  "strapOn": [
+   true,
+   false
+  ],
+  "pools": [
+   {
+    "fluid": "kerolox",
+    "mass": 0
+   },
+   {
+    "fluid": "jetfuel",
+    "mass": 34381.590000886696
+   }
+  ],
+  "finControlPerQ": 0,
+  "warnings": []
  }
 }

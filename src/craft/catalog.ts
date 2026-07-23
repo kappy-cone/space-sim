@@ -115,6 +115,10 @@ export interface PartDef {
   fairing?: { innerRadius: number; innerHeight: number };
   /** Decoupler/pylon passes propellant (crossfeed). */
   crossfeed?: boolean;
+  /** Release pylon: separation SPAWNS the subtree as a live second
+   * vessel instead of subtracting its mass (air launch). The pylon
+   * stays with the carrier. */
+  release?: boolean;
   /** Dedicated ullage motor: fired to settle propellant, not propulsion. */
   ullage?: boolean;
   deploy?: DeployDef;
@@ -405,6 +409,20 @@ export const PARTS: readonly PartDef[] = [
     source: 'Strap-on attach/release fitting class (Atlas V SRB attach ~150 kg) — ESTIMATE',
     stackTop: false,
     stackBottom: true, // the booster stack hangs from the pylon
+    radialParent: false,
+    radialChild: true,
+  }),
+  def({
+    id: 'pylon-release',
+    name: 'Release Pylon (air launch)',
+    kind: 'decoupler',
+    segments: [cyl(0.24, 0.8)],
+    color: [0.6, 0.62, 0.7],
+    dryMass: 220,
+    source: 'B-52/X-15 pylon-and-hooks class — mass ESTIMATE; hooks stay with the carrier on release',
+    release: true,
+    stackTop: false,
+    stackBottom: true, // the released vehicle hangs from the pylon
     radialParent: false,
     radialChild: true,
   }),

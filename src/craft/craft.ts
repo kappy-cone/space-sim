@@ -206,9 +206,34 @@ export function starterCrafts(): { name: string; craft: Craft }[] {
   dart.P('wing', 'wing-delta', 'fus', { kind: 'radial', angle: 0, y: 0.2 });
   dart.P('gear', 'gear-retract', 'fus', { kind: 'radial', angle: Math.PI, y: 3 });
 
+  // Air Launcher — the air-launch sortie (X-7 practice: the RJ43's
+  // testbed was carried aloft and dropped, then boosted past ramjet
+  // light-off). Carrier: Stratoliner-derived. Payload on the release
+  // pylon: a two-stage dart — J79 boost stage pushes it from the drop
+  // Mach through transonic to ramjet light-off (~M1.9), stages away,
+  // and the RJ43 takes it to M3+. Release spawns the dart as its own
+  // vessel; the carrier keeps flying and can land.
+  const airl = make('Air Launcher');
+  airl.P('root', 'nose-24', null, { kind: 'below' });
+  airl.P('fus', 'jf24', 'root', { kind: 'below' }, 1, 10);
+  airl.P('eng', 'e-cfm56', 'fus', { kind: 'below' }, 2);
+  airl.P('wing', 'wing-swept', 'fus', { kind: 'radial', angle: 0, y: 6.2 });
+  airl.P('tail', 'tailplane', 'fus', { kind: 'radial', angle: 0, y: 0.4 });
+  airl.P('gear', 'gear-retract', 'fus', { kind: 'radial', angle: Math.PI, y: 2 });
+  airl.P('pylon', 'pylon-release', 'fus', { kind: 'radial', angle: Math.PI, y: 8 });
+  airl.P('dart-nose', 'nose-12', 'pylon', { kind: 'below' });
+  airl.P('dart-tank2', 'jf12', 'dart-nose', { kind: 'below' }, 1, 1.5);
+  airl.P('dart-ram', 'e-rj43', 'dart-tank2', { kind: 'below' });
+  airl.P('dart-fins2', 'fin-s', 'dart-tank2', { kind: 'radial', angle: 0.5, y: 0.3 }, 4);
+  airl.P('dart-dec', 'dec-12', 'dart-ram', { kind: 'below' });
+  airl.P('dart-tank1', 'jf12', 'dart-dec', { kind: 'below' }, 1, 2);
+  airl.P('dart-jet', 'e-j79', 'dart-tank1', { kind: 'below' });
+  airl.P('dart-fins1', 'fin-s', 'dart-tank1', { kind: 'radial', angle: 0.2, y: 0.4 }, 4);
+
   gull.craft.vehicleClass = 'plane';
   strato.craft.vehicleClass = 'plane';
   dart.craft.vehicleClass = 'plane';
+  airl.craft.vehicleClass = 'plane';
 
   return [
     { name: 'Reference Orbiter', craft: referenceCraft() },
@@ -220,6 +245,7 @@ export function starterCrafts(): { name: string; craft: Craft }[] {
     { name: 'Gull Trainer', craft: gull.craft },
     { name: 'Stratoliner', craft: strato.craft },
     { name: 'Silver Dart', craft: dart.craft },
+    { name: 'Air Launcher', craft: airl.craft },
   ];
 }
 
@@ -411,6 +437,22 @@ export function placements(craft: Craft): Map<string, Placement> {
   for (const p of out.values()) for (const i of p.instances) minY = Math.min(minY, i.y);
   for (const p of out.values()) for (const i of p.instances) i.y -= minY;
   return out;
+}
+
+/**
+ * Re-root the subtree hanging under a release pylon as its own Craft —
+ * what the released vessel compiles from. The pylon itself is NOT
+ * included (it stays with the carrier). Class defaults to rocket: the
+ * released stack flies on its own merits, not the carrier's wings.
+ */
+export function subCraftFrom(craft: Craft, pylonId: string): Craft {
+  const child = children(craft, pylonId).find((c) => c.attach.kind === 'below');
+  if (!child) throw new Error('release pylon has nothing attached');
+  const parts: Record<string, CraftPart> = {};
+  // subtreeIds lists DESCENDANTS only — the new root is added explicitly.
+  for (const id of [child.id, ...subtreeIds(craft, child.id)]) parts[id] = { ...craft.parts[id]! };
+  parts[child.id] = { ...parts[child.id]!, parentId: null, attach: { kind: 'below' } };
+  return { name: `${craft.name} payload`, rootId: child.id, parts, stageOrder: [] };
 }
 
 /** Total instance count for a part (its own symmetry times every radial
