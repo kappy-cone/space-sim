@@ -48,6 +48,7 @@ wins on a rocket.
 | Decouplers 1.2/2.4/3.7 | Serial staging at each diameter |
 | Radial pylon | Strap-on boosters: parallel burn, separate jettison |
 | Radial pylon + duct | Asparagus/TSTO crossfeed: core drains the strap-on first, stages away full |
+| Release pylon (✈ carrier) | Air launch: separation SPAWNS the payload as a live second vessel (control follows it; the hooks stay with the carrier) |
 | Adapters 2.4→1.2, 3.7→2.4 | Mixed-diameter stacks (hydrolox uppers are fatter per kg — adapters are how you afford them) |
 | Nose cones | Cd 0.25 vs 0.7 blunt face — pays its mass back in drag on any slender stack |
 | Fairings 2.4/3.7 | Wide/bumpy payloads: encloses them from the drag model (upgraded so this is physics, not decoration); jettison mass when spent |

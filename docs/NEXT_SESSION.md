@@ -1,8 +1,91 @@
 # Handoff notes for the next working session
 
-Written 2026-07-23 at the end of the SOI/moon pass (the session after the
-landing/realism pass). Read this before touching code; it is the condensed
-context that isn't obvious from the source.
+Written 2026-07-23 at the end of the PLANE-CLASS pass (after the parts
+expansion). Read this before touching code; it is the condensed context
+that isn't obvious from the source.
+
+## The plane-class pass (this session) — what landed
+
+1. **Previous session's five loose ends fixed first**: methalox 1.2 m
+   tank; RCS torque always requires propellant (free legacy path gone);
+   legs/chutes on the generic DeployDef mechanism; crossfeed-honest
+   builder Δv (`phaseWalkReport` — closed-form walk of the sim's own
+   drain order; asparagus provably beats plain parallel); drain-order
+   arrows in the staging panel.
+2. **Regression baseline** cut BEFORE any plane code: Heavy Lifter golden
+   trajectory + `golden/compile.json` (every builder number for every
+   starter, exact-match). Rocket fixtures stayed byte-identical through
+   the whole pass — the gate is `Vehicle.planeAero` (absent on every
+   rocket; the CLASS gates at compile, not the parts).
+3. **Flight model** (`aero.ts`, all cited): Prandtl/Helmbold finite-wing
+   slopes, stall α = Cl_max/a blending 5° to Hoerner flat plate, induced
+   drag, Glauert flap effectiveness, Nelson downwash. One shared
+   `planeSurfaceForces()` feeds the RK4 deriv AND the Δv accounting.
+   Elevator rides the control cascade gimbal-style, authority probed
+   NUMERICALLY from the same force function. **Sign trap**: the planar
+   CCW AoA convention makes "nose toward sky" heading-dependent —
+   incidence/elevator offsets are signed by sign(r×v). planeStability()
+   gives NP + static margin in %MAC.
+4. **Jets**: thrust = T_SL·(ρ/ρ₀)·f(M), ṁ = tsfc·T (fuel only), flameout
+   envelope with named events + windmill relight. CFM56 (Isp 6,605 s —
+   the 20× headline), J79 max-A/B (M0–2.2), RJ43 ramjet (ZERO static
+   thrust, boost to M1.8 to light, M4.3). The CFM56 f(M) table is
+   calibrated to the published cruise point IN THIS SIM'S atmosphere
+   (which reads ~25 % thin at 11 km) and frozen behind a pinned test.
+5. **Parts**: 3 wings (ASK-21 / 737-800 / wet Concorde delta with
+   elevons + 75 m³ internal fuel) + tailplane, 2 gears (fixed vs
+   retractable — mass vs clean), per-part maxQ/maxMach (the scalar
+   heating stand-in, checked only at meaningful q). PARTS.md has the
+   per-class column; roster.test pins non-overlapping wing bands.
+6. **Builder**: class picker (New rocket / New plane), class-filtered
+   bin, %MAC + trim-authority readout (never calibers on a plane), honest
+   plane verdicts (no LEO claim off a 6,605 s Isp — jet stages show
+   'air'), regime bars (Mach + altitude strips per propulsion/lifting
+   part) in the bin.
+7. **Runway + ground roll**: `stepRolling` — 1-D along-surface dynamics
+   between the pin and free flight; kinematic rotation (3°/s, 12° clamp);
+   liftoff at L + T·sinθ ≥ W with a continuous seam; runway touchdown
+   mode (sink vs 14 CFR 25.473, tilt vs the RUNWAY) entering a braking
+   rollout (touch-and-go works); sites.ts (pad + 4 km runway). Planes
+   rest HORIZONTAL and fly manual.
+8. **Starter planes**: Gull Trainer, Stratoliner, Silver Dart (Concorde
+   proportions; engines in mid-ship pods because a tail stack drags the
+   CG behind the wet delta's NP), Air Launcher (carrier + two-stage
+   J79→ramjet dart on the release pylon — the X-7 sortie).
+9. **Two persistent vessels**: release pylons spawn the payload as a live
+   second Sim (compile lumps the sub-craft's EXACT wet mass into
+   sepMass — conservation by construction; the released section is
+   strap-on-flagged so carrier engines burn through the release).
+   `[`/`]` switch; per-vessel trails/events (name-prefixed); global warp
+   takes the strictest per-vessel clamp; scope-fenced to release pylons
+   only (normal staging is still mass subtraction).
+
+Flying notes from the live sortie: rotating at Vs parks you ON the
+lift≈weight boundary where induced drag eats the thrust surplus — rotate
+~1.25·Vs. The Gull will skip (lift off, touch, lift again) if held level
+at full throttle; that's real.
+
+## Loose ends from the plane pass (pick up next)
+
+- **Heavy Lifter can't reach orbit under the stock AP** (pinned in the
+  heavy-ascent golden; separate task/worktree may already address it).
+- **Mixed jet+rocket in ONE stage can't both feed** (pools are one fluid
+  per section — liquids[0] wins). Serial jet stage → rocket stage works;
+  a true SSTO spaceplane wants per-fluid pools per section.
+- **Silver Dart dry CG is near-neutral** (fuel burn walks the CG — the
+  real Concorde pumped fuel; consider a CG readout vs fuel state or
+  accept as the delta's character).
+- **Sailplane wing has no starter** (nothing slow enough in the engine
+  roster; it's a bin part for player builds).
+- **Supersonic wave drag isn't modeled** (delta cd0 is flat; the
+  machDragFactor covers the body only) and **vortex lift is absent**
+  (delta clMax 1.1 flagged conservative).
+- **Released vessels are always rocket-class** (a released plane would
+  need a class flag on the pylon or sub-craft).
+- **Jet burn-time/endurance in the builder is static-thrust only**.
+- **Carrier recovery isn't scored** (landing the carrier after release
+  works physically; nothing celebrates it).
+- Hint bar doesn't mention `[`/`]` switching.
 
 ## Hard invariants (violating any of these is the main failure mode)
 

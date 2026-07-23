@@ -4,6 +4,16 @@ A small rocket-building sim: assemble a rocket in a 3D VAB, launch it, find
 out whether it made orbit — and whether it stayed pointing the right way.
 Real physics under the hood, all the numbers on screen.
 
+Now with a second vehicle class: **planes**. Finite-wing lift with stall
+(Prandtl/Helmbold slopes, flat-plate post-stall), air-breathing engines
+with real Mach/altitude envelopes (a turbofan's fuel-only Isp is 6,605 s
+against a Merlin's 311 — no oxidizer aboard is the whole point), runway
+takeoff and landing with an honest ground-roll regime, static margin in
+% MAC (never calibers on an aircraft), and air launch: a release pylon
+spawns the payload as a second live vessel — `[`/`]` switches control,
+the carrier keeps flying. The ramjet dart has no runway starter on
+purpose: its real testbed, the X-7, was air-dropped.
+
 ## Run
 
 ```bash
