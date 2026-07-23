@@ -43,14 +43,19 @@ via patched conics later). Every constant carries its source.
 - **Trajectory**: fixed-step RK4 powered/atmospheric; universal-variable
   Kepler for every coast (never integrated — exact at any warp).
 
-### Validation (33 tests)
+### Validation (46 tests)
 
 Tsiolkovsky to 1e-9 · energy/momentum over 1000 Kepler orbits · Hohmann vs
 closed form · terminal velocity · RK4 drift < 1e-10/orbit · Kepler round
 trips · cylinder inertia closed form · CoM shift from settling · Barrowman
 component sanity · finned stick weathervanes, finless stick tumbles · the
 reference craft compiles stable, clears the LEO budget, and reaches orbit
-through the full craft → compile → 3-DOF sim → autopilot pipeline.
+through the full craft → compile → 3-DOF sim → autopilot pipeline ·
+determinism (bit-identical reruns) · RK4 4th-order convergence · the
+RK4↔Kepler seam · exact Δv loss accounting (ideal − gravity − aero −
+steering = actual, each term in its published range) · the suicide-burn
+predictor lands the burn it recommends · chute safe-q envelope · named
+touchdown-limit failures and tipping vs the leg footprint.
 
 ## The game
 
@@ -82,3 +87,26 @@ src/craft/     part catalog, craft tree, compile → vehicle + geometry + aero
 src/gl/        minimal WebGL2: f64 mat4, procedural meshes, renderer, picking
 src/ui/        VAB editor, 3D flight view, formatting
 ```
+
+## Landing
+
+Flight has three regimes: integrated (RK4), on-rails (Kepler), and
+**surface** — a resting vehicle is pinned to the rotating ground, never
+integrated. Contact is adjudicated at the hull/leg corners against four
+limits (vertical speed, horizontal speed, tilt, CoM inside the leg
+footprint), and a failure names the limit and by how much — "vertical
+speed 11.4 m/s, limit 6.0", not "crashed". Landing legs and parachutes
+(main + drogue, with safe-deploy dynamic-pressure envelopes) are parts;
+the descent HUD shows radar altitude (distinct from CoM altitude),
+separate vertical/horizontal speed, tilt, the live suicide-burn altitude,
+per-limit margin coloring, and a forward-integrated impact marker.
+Auto-land executes exactly the burn the predictor recommends.
+
+The atmosphere now carries its stages both ways: USSA76 temperature →
+speed of sound → a transonic Cd(Mach) drag-rise curve in the physics, and
+altitude-staged sky color, haze shells, plume expansion, and Mach/q
+readouts on the surface. Terrain is visual (landmass-colored rotating
+globe); collision stays the smooth sphere per the landing brief. The moon
+sits in the body table with real ephemeris (rendered in the sky, SOI
+precomputed) as scaffolding for patched conics — transitions are the next
+pass.
