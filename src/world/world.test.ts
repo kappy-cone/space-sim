@@ -15,7 +15,15 @@ import { elementsFromState, propagateKepler } from '../physics/kepler';
 import { Sim } from '../physics/sim';
 import { vec } from '../physics/vec2';
 import { advanceDecay, perOrbitDrag } from './decay';
-import { harvestCommittedFlight } from './commit';
+import {
+  ascentDirection,
+  corridorViolated,
+  harvestCommittedFlight,
+  restingRunwayOf,
+} from './commit';
+import { starterCrafts } from '../craft/craft';
+import { siteById } from '../physics/sites';
+import { activateSite, siteAvailable, siteState } from './world';
 import {
   SpaceObject,
   WorldState,
@@ -257,6 +265,67 @@ describe('committed-flight harvest', () => {
     expect(res.events.some((e) => e.type === 'deployed')).toBe(true);
     // The whole thing survives a save round-trip.
     expect(deserializeWorld(serializeWorld(w))).toEqual(w);
+  });
+
+  it('launching wears the pad and blocks it until the reset elapses', () => {
+    const compiled = compile(referenceCraft());
+    const sim = new Sim(compiled.vehicle);
+    sim.crashed = true; // outcome irrelevant — wear is about the departure
+    sim.landed = false;
+    const w = emptyWorld();
+    harvestCommittedFlight(w, [{ sim, name: 'X' }], { siteId: 'pad-1', launchName: 'X' });
+    expect(siteState(w, 'pad-1').wearUntil).toBeGreaterThan(0);
+    expect(siteAvailable(w, 'pad-1')).toBe(false);
+    // Heavier vehicles wear the pad longer — the quiet gentleness reward.
+    advanceWorld(w, siteState(w, 'pad-1').wearUntil - w.epoch + 1);
+    expect(siteAvailable(w, 'pad-1')).toBe(true);
+  });
+
+  it('a plane down on an unbuilt runway activates the site (and the pad it serves)', () => {
+    const gull = starterCrafts().find((s) => s.name === 'Gull Trainer')!;
+    const compiled = compile(gull.craft);
+    // Pinned to the West Range strip at start — resting on the runway is
+    // exactly the state a completed delivery flight ends in.
+    const sim = new Sim(compiled.vehicle, undefined, siteById('runway-west'));
+    expect(sim.landed).toBe(true);
+    expect(restingRunwayOf(sim)?.id).toBe('runway-west');
+    const w = emptyWorld();
+    expect(siteAvailable(w, 'pad-west')).toBe(false);
+    const res = harvestCommittedFlight(w, [{ sim, name: 'Ferry' }], {
+      siteId: 'runway-1',
+      launchName: 'Ferry',
+    });
+    expect(res.recovered).toEqual(['Ferry']);
+    expect(siteState(w, 'runway-west').active).toBe(true);
+    expect(siteState(w, 'pad-west').active).toBe(true); // the chain
+    expect(w.log.some((e) => e.type === 'siteActivated')).toBe(true);
+  });
+
+  it('range corridors: direction detection and per-site legality', () => {
+    const compiled = compile(referenceCraft());
+    const sim = new Sim(compiled.vehicle);
+    // Fabricate a downrange state: 10 km up, 800 m/s eastward inertial
+    // (≈ 335 m/s over the rotating surface — clearly committed).
+    const r = sim.body.radius + 10_000;
+    sim.landed = false;
+    sim.state = { ...sim.state, r: vec(r, 0), v: vec(0, 800) };
+    expect(ascentDirection(sim)).toBe(1);
+    sim.state = { ...sim.state, v: vec(0, -500) };
+    expect(ascentDirection(sim)).toBe(-1);
+    sim.state = { ...sim.state, v: vec(0, r * sim.body.rotationRate) }; // co-rotating: not committed
+    expect(ascentDirection(sim)).toBe(0);
+    expect(corridorViolated(siteById('pad-1'), -1)).toBe(true); // Cape flies east only
+    expect(corridorViolated(siteById('pad-1'), 1)).toBe(false);
+    expect(corridorViolated(siteById('pad-west'), 1)).toBe(true); // West Range flies west only
+    expect(corridorViolated(siteById('runway-1'), -1)).toBe(false); // runways: both
+  });
+
+  it('activation chains are idempotent', () => {
+    const w = emptyWorld();
+    activateSite(w, 'runway-west', 100);
+    const n = w.log.length;
+    activateSite(w, 'runway-west', 200);
+    expect(w.log.length).toBe(n); // nothing new
   });
 
   it('crashed vessels write nothing; landed vessels count as recovered', () => {

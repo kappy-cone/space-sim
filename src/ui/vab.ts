@@ -26,6 +26,9 @@ import {
   partHeight,
 } from '../craft/craft';
 import { OrbitCamera } from '../gl/camera';
+import { SITES, defaultSite } from '../physics/sites';
+import { WorldState, siteAvailable, siteState } from '../world/world';
+import { LaunchContext } from './flight3d';
 import { multiply, rotationY, scaling, scalingXYZ, translation, v3 } from '../gl/mat4';
 import { finMesh, gridMesh, segmentsMesh, wingMesh } from '../gl/mesh';
 import { planeStability } from '../physics/massmodel';
@@ -135,7 +138,9 @@ export class Vab {
 
   constructor(
     private root: HTMLElement,
-    private onLaunch: (compiled: Compiled, craft: Craft) => void,
+    private onLaunch: (compiled: Compiled, craft: Craft, launch: LaunchContext) => void,
+    private world: WorldState,
+    private saveWorld: () => void,
   ) {
     const saved = localStorage.getItem(STORAGE_KEY);
     this.craft = saved ? deserialize(saved) : referenceCraft();
@@ -620,10 +625,94 @@ export class Vab {
       ${stability}
       ${warnings}
       <button class="primary launch-btn">Launch ▸</button>`;
-    this.statsEl.querySelector<HTMLButtonElement>('.launch-btn')!.onclick = () => {
-      localStorage.setItem(STORAGE_KEY, serialize(this.craft));
-      this.onLaunch(this.compiled, this.craft);
+    this.statsEl.querySelector<HTMLButtonElement>('.launch-btn')!.onclick = () => this.launchDialog();
+  }
+
+  /**
+   * The launch dialog — where the session model is chosen. A TEST
+   * flight is the iteration loop: it writes nothing to the world, ever.
+   * A COMMITTED flight launches at the world epoch from a real site,
+   * takes site wear, obeys the range corridor, and is harvested into
+   * the registry on exit.
+   */
+  private launchDialog(): void {
+    const veil = document.createElement('div');
+    veil.className = 'modal-veil';
+    veil.onclick = (e) => {
+      if (e.target === veil) veil.remove();
     };
+    const box = document.createElement('div');
+    box.className = 'panel modal';
+    veil.appendChild(box);
+    const plane = !!this.compiled.vehicle.planeAero;
+    let committed = false;
+    let siteId = defaultSite(plane).id;
+
+    const render = (): void => {
+      const w = this.world;
+      const sites = SITES.filter(
+        (s) => s.body === 'earth' && s.type === (plane ? 'runway' : 'pad') && siteState(w, s.id).discovered,
+      );
+      if (!sites.some((s) => s.id === siteId)) siteId = sites[0]?.id ?? siteId;
+      const siteRows = sites
+        .map((s) => {
+          const st = siteState(w, s.id);
+          const worn = st.wearUntil > w.epoch;
+          const blocked = committed && (!st.active || worn);
+          const status = !st.active
+            ? 'not built out — land a cargo flight there'
+            : worn
+              ? `resets in ${fmtTime(st.wearUntil - w.epoch)}`
+              : 'ready';
+          return `<label class="site-row${blocked ? ' blocked' : ''}">
+            <input type="radio" name="site" value="${s.id}" ${s.id === siteId ? 'checked' : ''} ${blocked ? 'disabled' : ''}>
+            ${s.name} · corridor ${s.corridor === 'both' ? 'east + west' : s.corridor}
+            <span class="site-status">${status}</span>
+          </label>`;
+        })
+        .join('');
+      box.innerHTML = `
+        <h3>Launch — ${this.craft.name}</h3>
+        <div class="modal-section">
+          <label><input type="radio" name="mode" value="test" ${committed ? '' : 'checked'}>
+            Test flight — a simulation; writes nothing to the world</label>
+          <label><input type="radio" name="mode" value="committed" ${committed ? 'checked' : ''}>
+            Committed flight #${w.launches + 1} — enters the program record: registry, debris, site wear</label>
+        </div>
+        <div class="modal-section"><b>${plane ? 'Runway' : 'Pad'}</b>${siteRows}</div>
+        <div class="modal-section dim">World clock T ${fmtTime(w.epoch)} · ${w.launches} committed launch${w.launches === 1 ? '' : 'es'} · ${this.world.objects.length} object${this.world.objects.length === 1 ? '' : 's'} on orbit</div>
+        <div class="modal-actions">
+          <button class="go primary">${committed ? 'Commit & launch ▸' : 'Fly ▸'}</button>
+          <button class="cancel">Cancel</button>
+        </div>`;
+      box.querySelectorAll<HTMLInputElement>('input[name=mode]').forEach((r) => {
+        r.onchange = () => {
+          committed = r.value === 'committed';
+          render();
+        };
+      });
+      box.querySelectorAll<HTMLInputElement>('input[name=site]').forEach((r) => {
+        r.onchange = () => {
+          siteId = r.value;
+          render();
+        };
+      });
+      box.querySelector<HTMLButtonElement>('.cancel')!.onclick = () => veil.remove();
+      const go = box.querySelector<HTMLButtonElement>('.go')!;
+      go.disabled = committed && !siteAvailable(this.world, siteId);
+      go.onclick = () => {
+        veil.remove();
+        localStorage.setItem(STORAGE_KEY, serialize(this.craft));
+        this.onLaunch(this.compiled, this.craft, {
+          world: this.world,
+          committed,
+          siteId,
+          save: this.saveWorld,
+        });
+      };
+    };
+    render();
+    this.root.appendChild(veil);
   }
 
   private renderStaging(): void {

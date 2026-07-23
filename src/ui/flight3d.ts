@@ -12,7 +12,7 @@ import { Craft, placements } from '../craft/craft';
 import { Autopilot, defaultPlan } from '../physics/autopilot';
 import { BODIES, bodyById, bodyOrbitState } from '../physics/bodies';
 import { LandingAutopilot } from '../physics/landing';
-import { Sim, TOUCHDOWN_LIMITS } from '../physics/sim';
+import { Sim, TOUCHDOWN_LIMITS, wrapPi } from '../physics/sim';
 import { massFromStage, stageIgnitionLimit, stageMinThrottle, stageThrustAtPressure } from '../physics/vehicle';
 import { engineById } from '../physics/parts';
 import { machDragFactor, speedOfSound } from '../physics/atmosphere';
@@ -31,9 +31,23 @@ import {
 } from '../gl/mat4';
 import { finMesh, groundCapMesh, moonColor, segmentsMesh, sphereMesh, terrainColor, wingMesh } from '../gl/mesh';
 import { planeStability } from '../physics/massmodel';
-import { SITES } from '../physics/sites';
+import { SITES, Site, siteById, defaultSite } from '../physics/sites';
 import { Renderer } from '../gl/renderer';
 import { fmtDistance, fmtMass, fmtSpeed, fmtTime } from './format';
+import { WorldState, siteState } from '../world/world';
+import { ascentDirection, corridorViolated, harvestCommittedFlight } from '../world/commit';
+
+/** How a flight relates to the persistent world. The world is READ
+ * freely (sites, network, registry); it is WRITTEN only when a
+ * committed flight exits through the harvest. Test flights: committed
+ * is false and nothing is ever written. */
+export interface LaunchContext {
+  world: WorldState;
+  committed: boolean;
+  siteId: string;
+  /** Persist the world after a committed harvest. */
+  save(): void;
+}
 
 // 10,000× exists for translunar coasts (a transfer is ~5 days); coasts
 // ride analytic Kepler so high warp costs nothing in accuracy.
@@ -140,14 +154,28 @@ export class Flight3D {
   private warpLabel!: HTMLElement;
   private throttleSlider!: HTMLInputElement;
 
+  /** World context: always readable; written only via the committed
+   * harvest on exit. */
+  private launch?: LaunchContext;
+  private launchSite: Site;
+  /** Sim-clock value at flight start (world epoch for committed flights)
+   * — the HUD's MET zero. */
+  private metOffset = 0;
+  private rangeViolated = false;
+  private harvested = false;
+
   constructor(
     private root: HTMLElement,
     private compiled: Compiled,
     craft: Craft,
     private targetAltitude = 250_000,
     private onExit?: () => void,
+    launch?: LaunchContext,
   ) {
-    this.sim = new Sim(compiled.vehicle);
+    this.launch = launch;
+    this.launchSite = launch ? siteById(launch.siteId) : defaultSite(!!compiled.vehicle.planeAero);
+    this.metOffset = launch?.committed ? launch.world.epoch : 0;
+    this.sim = new Sim(compiled.vehicle, undefined, this.launchSite, undefined, this.metOffset);
     this.ap = new Autopilot(defaultPlan(targetAltitude, this.sim.body));
     if (compiled.vehicle.planeAero) {
       // Planes start on the runway, nose on the horizon; arrows pitch
@@ -271,6 +299,7 @@ export class Flight3D {
         ? ([
             ['stall', 'Stall margin'],
             ['trim', 'Elevator'],
+            ['appr', 'Approach'],
           ] as [string, string][])
         : []),
       ['margin', 'Stability'],
@@ -356,13 +385,13 @@ export class Flight3D {
     if (this.onExit) {
       const back = document.createElement('button');
       back.textContent = '◂ VAB';
-      back.onclick = () => this.onExit!();
+      back.onclick = () => this.exitFlight();
       panel.appendChild(back);
     }
     this.launchBtn = document.createElement('button');
     this.launchBtn.className = 'primary';
     this.launchBtn.textContent = 'Launch';
-    this.launchBtn.onclick = () => this.launch();
+    this.launchBtn.onclick = () => this.beginFlight();
     this.apBtn = document.createElement('button');
     this.apBtn.textContent = `Autopilot: ${this.autopilotOn ? 'on' : 'off'}`;
     this.apBtn.onclick = () => this.toggleAutopilot();
@@ -421,10 +450,42 @@ export class Flight3D {
     this.root.appendChild(bar);
   }
 
-  private launch(): void {
+  private beginFlight(): void {
     if (this.running) return;
     this.running = true;
     this.launchBtn.disabled = true;
+  }
+
+  /**
+   * Leave the flight view. THE COMMIT POINT: a committed flight is
+   * harvested into the world exactly once, here — orbits become registry
+   * entries, spent stages become debris, landings become recoveries and
+   * site activations, the clock advances. A test flight skips all of it.
+   */
+  private exitFlight(): void {
+    if (this.launch?.committed && !this.harvested && this.running) {
+      this.harvested = true;
+      this.syncActive();
+      const res = harvestCommittedFlight(
+        this.launch.world,
+        this.vessels.map((v) => ({
+          sim: v.sim,
+          name: v.name,
+          releasedStages: v.compiled.released?.map((r) => r.sectionBurnIndex),
+        })),
+        {
+          siteId: this.launch.siteId,
+          launchName: this.vessels[0]!.name,
+          rangeViolated: this.rangeViolated,
+        },
+      );
+      this.launch.save();
+      console.warn(
+        `[world] launch #${this.launch.world.launches} committed: +${res.added.length} object(s), ` +
+          `${res.recovered.length} recovered, epoch ${fmtTime(this.launch.world.epoch)}`,
+      );
+    }
+    this.onExit?.();
   }
 
   // ---------- vessels (air launch) ----------
@@ -609,7 +670,7 @@ export class Flight3D {
   private onKey = (e: KeyboardEvent): void => {
     if (e.key === ' ') {
       e.preventDefault();
-      if (!this.running) this.launch();
+      if (!this.running) this.beginFlight();
       else this.nextStageAction();
     } else if (e.key === '.') this.setWarp(this.warpIndex + 1);
     else if (e.key === ',') this.setWarp(this.warpIndex - 1);
@@ -678,6 +739,25 @@ export class Flight3D {
         }
         toAdvance -= dt;
         ticks++;
+      }
+    }
+
+    // Range-safety corridor: adjudicated on the launched vessel once it
+    // is clearly downrange-committed. Detected on every flight (the
+    // iteration loop should teach it); it only has CONSEQUENCES when a
+    // committed flight carries the flag into the harvest.
+    if (this.running && !this.rangeViolated && this.vessels[0]) {
+      const s0 = this.vessels[0].sim;
+      if (!s0.landed && !s0.crashed && s0.body.id === this.launchSite.body && s0.altitude > 2_000) {
+        const dir = ascentDirection(s0);
+        if (corridorViolated(this.launchSite, dir)) {
+          this.rangeViolated = true;
+          const div = document.createElement('div');
+          div.textContent =
+            `T+${fmtTime(s0.state.t - this.metOffset)}  ⚠ RANGE VIOLATION — ` +
+            `${dir > 0 ? 'eastward' : 'westward'} flight out of the ${this.launchSite.name} '${this.launchSite.corridor}' corridor`;
+          this.feed.prepend(div);
+        }
       }
     }
 
@@ -830,7 +910,7 @@ export class Flight3D {
       }
       if (!text) continue; // events without feed copy (gear/legs handled by rows)
       const div = document.createElement('div');
-      div.textContent = `T+${fmtTime(ev.t)}  ${prefix}${text}`;
+      div.textContent = `T+${fmtTime(ev.t - this.metOffset)}  ${prefix}${text}`;
       this.feed.prepend(div);
       while (this.feed.children.length > 5) this.feed.lastChild?.remove();
     }
@@ -948,37 +1028,27 @@ export class Flight3D {
       );
     }
 
-    // Launch pad (rotates with the body): a platform up close, a beacon
-    // cone when zoomed out to map scales. The pad is the Earth launch
-    // site — not drawn when another body is the reference.
-    if (s.body.id === 'earth') {
-      const padA = s.body.rotationRate * s.state.t;
-      const padW = this.toWorld(s.body.radius * Math.cos(padA), s.body.radius * Math.sin(padA));
-      if (this.camera.dist < 3_000) {
-        const padModel = multiply(
-          multiply(translation(padW.x, padW.y, padW.z), rotationZ(-padA)),
-          scalingXYZ(22, 0.4, 22),
-        );
-        this.renderer.draw('padDisc', padModel, [0.3, 0.32, 0.36]);
-      } else {
-        const padScale = this.camera.dist * 0.012;
-        this.renderer.draw(
-          'pad',
-          multiply(translation(padW.x, padW.y, padW.z), scaling(padScale)),
-          [1.0, 0.78, 0.34],
-          1,
-          true,
-        );
-      }
-    }
-
-    // Runways (rotate with the body): a 4 km asphalt strip along the
-    // surface tangent up close, a cyan beacon at map scales.
+    // Sites (rotate with the body): pads are platforms up close and
+    // amber beacons at map scales; runways are 4 km strips and cyan
+    // beacons. UNDISCOVERED sites do not render — they must be found
+    // (survey reveal or overflight) before they exist for the player.
     for (const site of SITES) {
-      if (site.type !== 'runway' || site.body !== s.body.id) continue;
+      if (site.body !== s.body.id) continue;
+      if (this.launch && !siteState(this.launch.world, site.id).discovered) continue;
       const a = site.angle + s.body.rotationRate * s.state.t;
       const w = this.toWorld(s.body.radius * Math.cos(a), s.body.radius * Math.sin(a));
-      if (this.camera.dist < 30_000) {
+      if (site.type === 'pad') {
+        if (this.camera.dist < 3_000) {
+          const padModel = multiply(
+            multiply(translation(w.x, w.y, w.z), rotationZ(-a)),
+            scalingXYZ(22, 0.4, 22),
+          );
+          this.renderer.draw('padDisc', padModel, [0.3, 0.32, 0.36]);
+        } else {
+          const padScale = this.camera.dist * 0.012;
+          this.renderer.draw('pad', multiply(translation(w.x, w.y, w.z), scaling(padScale)), [1.0, 0.78, 0.34], 1, true);
+        }
+      } else if (this.camera.dist < 30_000) {
         const model = multiply(
           multiply(translation(w.x, w.y, w.z), rotationZ(a + Math.PI / 2)),
           scalingXYZ(site.halfLength ?? 2_000, 0.3, 15),
@@ -987,6 +1057,40 @@ export class Flight3D {
       } else {
         const bScale = this.camera.dist * 0.012;
         this.renderer.draw('pad', multiply(translation(w.x, w.y, w.z), scaling(bScale)), [0.4, 0.8, 1.0], 1, true);
+      }
+    }
+
+    // Runway approach aids (plane class): a 3° glide-slope beam off each
+    // threshold of the nearest discovered runway — the ILS-standard
+    // approach angle (FAA AIM §1-1-9; PAPI on-slope is the same 3°).
+    const appr = this.nearestRunway();
+    if (appr && this.compiled.vehicle.planeAero && s.altitude < 8_000 && !s.landed) {
+      const base = appr.site.angle + s.body.rotationRate * s.state.t;
+      const half = appr.site.halfLength ?? 2_000;
+      const TAN3 = Math.tan((3 * Math.PI) / 180);
+      for (const side of [-1, 1] as const) {
+        const thrA = base + (side * half) / s.body.radius;
+        const ux = Math.cos(thrA);
+        const uy = Math.sin(thrA);
+        const beam = new Float32Array(6);
+        const p0 = this.toWorld(s.body.radius * ux, s.body.radius * uy);
+        // 15 km out along the surface tangent, rising at 3° (flat-earth
+        // over 15 km: the curvature drop is ~18 m against a 786 m rise).
+        const reach = 15_000;
+        const tx = -uy * side;
+        const ty = ux * side;
+        const p1 = this.toWorld(
+          (s.body.radius + reach * TAN3) * ux + reach * tx,
+          (s.body.radius + reach * TAN3) * uy + reach * ty,
+        );
+        beam[0] = p0.x - rocketW.x;
+        beam[1] = p0.y - rocketW.y;
+        beam[2] = p0.z - rocketW.z;
+        beam[3] = p1.x - rocketW.x;
+        beam[4] = p1.y - rocketW.y;
+        beam[5] = p1.z - rocketW.z;
+        this.renderer.updateLines(`gs-${side}`, beam, true);
+        this.renderer.draw(`gs-${side}`, translation(rocketW.x, rocketW.y, rocketW.z), [0.4, 0.9, 1.0], 0.35, true);
       }
     }
 
@@ -1253,6 +1357,25 @@ export class Flight3D {
 
   // ---------- HUD ----------
 
+  /** Nearest discovered runway on the current body within 80 km, with
+   * the glide-slope deviation vs the ILS-standard 3° (positive = high). */
+  private nearestRunway(): { site: Site; dist: number; dev: number } | null {
+    const s = this.sim;
+    if (!s.body.atmosphere) return null;
+    const surfA = Math.atan2(s.state.r.y, s.state.r.x) - s.body.rotationRate * s.state.t;
+    let best: { site: Site; dist: number } | null = null;
+    for (const site of SITES) {
+      if (site.type !== 'runway' || site.body !== s.body.id) continue;
+      if (this.launch && !siteState(this.launch.world, site.id).discovered) continue;
+      const d = Math.abs(wrapPi(surfA - site.angle)) * s.body.radius;
+      if (!best || d < best.dist) best = { site, dist: d };
+    }
+    if (!best || best.dist > 80_000) return null;
+    const toGo = Math.max(1, best.dist - (best.site.halfLength ?? 0));
+    const angle = (Math.atan2(Math.max(0, s.altitude), toGo) * 180) / Math.PI;
+    return { site: best.site, dist: best.dist, dev: angle - 3 };
+  }
+
   private set(key: string, text: string, cls = ''): void {
     // Rows are built per-craft (plane rows, vessel row) — a vessel switch
     // can land on a HUD without this key; skip rather than throw.
@@ -1267,7 +1390,7 @@ export class Flight3D {
     const el = s.elements;
     const atmTop = s.body.atmosphere?.topAltitude ?? 0;
     const stage = s.vehicle.stages[s.stageIndex];
-    this.set('met', `T+ ${fmtTime(s.state.t)}`);
+    this.set('met', `T+ ${fmtTime(s.state.t - this.metOffset)}`);
     this.set('phase', s.crashed ? 'LOST' : this.autopilotOn ? this.ap.phase : 'manual');
     if (this.vessels.length > 1) {
       this.set('vessel', `${this.activeIndex + 1}/${this.vessels.length} ${this.vessels[this.activeIndex]!.name} ([ ])`);
@@ -1322,6 +1445,19 @@ export class Flight3D {
         );
         this.set('trim', `δe ${((s.elevator * 180) / Math.PI).toFixed(1)}°`,
           Math.abs(s.elevator) > 0.8 * pa.elevMax ? 'warn' : '');
+        // Approach aid: distance to the nearest discovered runway and
+        // glide-slope deviation vs the 3° standard (PAPI on-slope band
+        // is roughly ±0.5°).
+        const ap3 = this.nearestRunway();
+        if (ap3 && !s.landed) {
+          this.set(
+            'appr',
+            `${ap3.site.name} ${fmtDistance(ap3.dist)} · GS ${ap3.dev >= 0 ? '+' : ''}${ap3.dev.toFixed(1)}°`,
+            Math.abs(ap3.dev) < 0.7 ? 'good' : 'warn',
+          );
+        } else {
+          this.set('appr', s.landed ? 'down' : '—');
+        }
       } else {
         this.set('margin', 'no wings', 'warn');
         this.set('stall', '—');

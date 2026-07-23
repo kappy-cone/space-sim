@@ -12,18 +12,62 @@
 // the world epoch (Sim startTime), so sep-state and final-state times
 // are already world times.
 
-import { Sim } from '../physics/sim';
+import { Sim, TOUCHDOWN_LIMITS, wrapPi } from '../physics/sim';
 import { elementsFromState } from '../physics/kepler';
 import { bodyById } from '../physics/bodies';
+import { SITES, Site, siteById } from '../physics/sites';
+import { P0_SEA_LEVEL } from '../physics/constants';
+import { stageThrustAtPressure } from '../physics/vehicle';
+import { cross, norm } from '../physics/vec2';
 import {
   SatelliteFunc,
   SpaceObject,
   WorldEvent,
   WorldState,
+  activateSite,
   advanceWorld,
+  applyWear,
   orbitPersists,
+  padWearSeconds,
   pushLog,
+  runwayWearSeconds,
 } from './world';
+
+/**
+ * Downrange direction of flight relative to the rotating surface:
+ * +1 east (prograde), −1 west (retrograde), 0 while effectively
+ * stationary. The corridor adjudicator samples this once the vessel is
+ * clearly downrange-committed.
+ */
+export function ascentDirection(sim: Sim): 1 | -1 | 0 {
+  const air = sim.airspeedVec;
+  const rn = norm(sim.state.r);
+  if (rn < 1) return 0;
+  const tangential = cross(sim.state.r, air) / rn; // + = east/prograde
+  if (Math.abs(tangential) < 100) return 0; // not yet committed
+  return tangential > 0 ? 1 : -1;
+}
+
+/** Does flying in direction `dir` from `site` violate its range-safety
+ * corridor? (Runways are 'both' — aircraft turn back freely.) */
+export function corridorViolated(site: Site, dir: 1 | -1 | 0): boolean {
+  if (dir === 0) return false;
+  return (site.corridor === 'east' && dir < 0) || (site.corridor === 'west' && dir > 0);
+}
+
+/** The runway a landed vessel is resting on, if any. */
+export function restingRunwayOf(sim: Sim): Site | null {
+  if (!sim.landed && !sim.hasLanded) return null;
+  const surfA = Math.atan2(sim.state.r.y, sim.state.r.x) - sim.body.rotationRate * sim.state.t;
+  return (
+    SITES.find(
+      (s) =>
+        s.type === 'runway' &&
+        s.body === sim.body.id &&
+        Math.abs(wrapPi(surfA - s.angle)) * sim.body.radius <= (s.halfLength ?? 0),
+    ) ?? null
+  );
+}
 
 export interface HarvestVessel {
   sim: Sim;
@@ -47,7 +91,7 @@ export interface HarvestResult {
 export function harvestCommittedFlight(
   w: WorldState,
   vessels: HarvestVessel[],
-  opts: { siteId: string; launchName: string },
+  opts: { siteId: string; launchName: string; rangeViolated?: boolean },
 ): HarvestResult {
   const launchEpoch = w.epoch;
   let tEnd = launchEpoch;
@@ -60,6 +104,23 @@ export function harvestCommittedFlight(
   const launchEv: WorldEvent = { type: 'launch', t: launchEpoch, n, site: opts.siteId, name: opts.launchName };
   events.push(launchEv);
   pushLog(w, launchEv);
+
+  // Launch-site wear: pads take refurbishment scaled by liftoff thrust;
+  // a runway departure is one light cycle.
+  const launchSite = siteById(opts.siteId);
+  if (vessels.length > 0) {
+    const v0 = vessels[0]!.sim.vehicle;
+    const wear =
+      launchSite.type === 'pad'
+        ? padWearSeconds(v0.stages[0] ? stageThrustAtPressure(v0.stages[0], P0_SEA_LEVEL) : 0)
+        : runwayWearSeconds(false);
+    applyWear(w, opts.siteId, wear, launchEpoch);
+  }
+  if (opts.rangeViolated) {
+    const ev: WorldEvent = { type: 'rangeViolation', t: launchEpoch, site: opts.siteId };
+    events.push(ev);
+    pushLog(w, ev);
+  }
 
   const added: SpaceObject[] = [];
   const recovered: string[] = [];
@@ -99,6 +160,18 @@ export function harvestCommittedFlight(
     if (s.crashed) continue;
     if (s.landed || s.hasLanded) {
       recovered.push(v.name);
+      // A plane down on a runway is a delivery flight: wear the strip
+      // (harder if the touchdown was rough), and if the field was not
+      // yet built out, this landing IS the hardware arriving — activate
+      // it (and the pad it serves).
+      const rw = restingRunwayOf(s);
+      if (rw && s.vehicle.planeAero) {
+        const touchdown = [...s.events].reverse().find((e) => e.type === 'landed');
+        const hard =
+          touchdown?.type === 'landed' && touchdown.vSpeed > 0.7 * TOUCHDOWN_LIMITS.runway.vSpeed;
+        applyWear(w, rw.id, runwayWearSeconds(!!hard), s.state.t);
+        events.push(...activateSite(w, rw.id, s.state.t));
+      }
       continue;
     }
     const el = elementsFromState(s.state.r, s.state.v, s.body.mu);

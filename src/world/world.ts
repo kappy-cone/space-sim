@@ -20,6 +20,7 @@
 // keeps the registry bounded.
 
 import { bodyById } from '../physics/bodies';
+import { siteById } from '../physics/sites';
 import { Elements, elementsFromState, propagateKepler } from '../physics/kepler';
 import { Vec2, vec } from '../physics/vec2';
 import { G0 } from '../physics/constants';
@@ -297,6 +298,68 @@ export function advanceWorld(w: WorldState, dt: number): WorldEvent[] {
   w.epoch = t1;
   for (const ev of events) pushLog(w, ev);
   return events;
+}
+
+// ---------- sites ----------
+
+/** Site status — a pure read: unmutated worlds report the static
+ * default (home complex discovered, everything else hidden). */
+export function siteState(w: WorldState, id: string): SiteState {
+  const s = w.sites[id];
+  if (s) return s;
+  const def = siteById(id);
+  return { discovered: def.startsDiscovered, active: def.startsDiscovered, wearUntil: 0 };
+}
+
+/** Usable for a committed launch right now. */
+export function siteAvailable(w: WorldState, id: string): boolean {
+  const s = siteState(w, id);
+  return s.discovered && s.active && s.wearUntil <= w.epoch;
+}
+
+export function discoverSite(w: WorldState, id: string, t: number): WorldEvent[] {
+  const s = siteState(w, id);
+  if (s.discovered) return [];
+  w.sites[id] = { ...s, discovered: true };
+  const ev: WorldEvent = { type: 'siteDiscovered', t, site: id };
+  pushLog(w, ev);
+  return [ev];
+}
+
+/** Activate a site (cargo delivery landed): discovers it too, and builds
+ * out the pad the runway serves, if any. */
+export function activateSite(w: WorldState, id: string, t: number): WorldEvent[] {
+  const events = discoverSite(w, id, t);
+  const s = siteState(w, id);
+  if (!s.active) {
+    w.sites[id] = { ...s, discovered: true, active: true };
+    const ev: WorldEvent = { type: 'siteActivated', t, site: id };
+    pushLog(w, ev);
+    events.push(ev);
+  }
+  const pad = siteById(id).activatesPad;
+  if (pad) events.push(...activateSite(w, pad, t));
+  return events;
+}
+
+export function applyWear(w: WorldState, id: string, seconds: number, from: number): void {
+  const s = siteState(w, id);
+  w.sites[id] = { ...s, wearUntil: Math.max(s.wearUntil, from + seconds) };
+}
+
+/** Pad refurbishment time scales with liftoff thrust — acoustic and
+ * thermal damage do (class values, ESTIMATE: modern F9-class pads turn
+ * around in days; heavy vehicles historically took weeks). This is the
+ * quiet reward for gentler vehicles. */
+export function padWearSeconds(liftoffThrustN: number): number {
+  return 86_400 * (1 + 0.8 * (liftoffThrustN / 1e6));
+}
+
+/** Runway wear: a nominal cycle is light; a HARD touchdown (sink rate
+ * above 70% of the 14 CFR 25.473 design limit) closes the strip for
+ * inspection (class values, ESTIMATE). */
+export function runwayWearSeconds(hardLanding: boolean): number {
+  return 86_400 * (hardLanding ? 2 : 0.25);
 }
 
 // ---------- terrain reveal ----------
