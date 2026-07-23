@@ -227,6 +227,7 @@ export class Flight3D {
     for (const b of BODIES) {
       this.renderer.mesh(`cap-${b.id}`, () => groundCapMesh(b.radius, 60_000, 0.15));
     }
+    this.renderer.lineMesh('starfield', buildStarfield(600));
     this.renderer.mesh('shell', () => sphereMesh(24, 36));
     this.renderer.mesh('plume', () => segmentsMesh([{ y0: -1, y1: 0, r0: 0.45, r1: 1 }]));
     this.renderer.mesh('pad', () => segmentsMesh([{ y0: 0, y1: 1, r0: 1, r1: 0 }]));
@@ -1012,6 +1013,22 @@ export class Flight3D {
       0.03 + 0.72 * skyF,
     ];
     this.renderer.begin(this.camera.proj(w / h, near, far), this.camera.viewRot(), this.camera.eye(), clear);
+
+    // Starfield: a fixed sphere of stars centered on the EYE (translation
+    // = eye ⇒ the renderer's camera-relative subtraction zeroes it), so
+    // the field rotates with the look direction but never parallaxes —
+    // it reads as infinity. Fades in as the sky darkens toward space.
+    const starA = Math.min(0.9, (1 - skyF) * 0.9);
+    if (starA > 0.03) {
+      const eye = this.camera.eye();
+      this.renderer.draw(
+        'starfield',
+        multiply(translation(eye.x, eye.y, eye.z), scaling(far * 0.92)),
+        [0.92, 0.94, 1.0],
+        starA,
+        true,
+      );
+    }
 
     // Planet: terrain-colored sphere rotating with the body (β = −ωt under
     // the plane mapping), plus haze shells at the USSA76 layer scales.
@@ -1830,6 +1847,48 @@ export class Flight3D {
   }
 }
 
+
+/** Procedural starfield on the unit sphere: each star is a tiny cross
+ * (two short GL_LINES segments) so it reads at any zoom. Deterministic
+ * (seeded LCG) so the sky is stable frame to frame — rendering may use
+ * randomness, but a stable field looks better than a twinkling one. */
+function buildStarfield(n: number): Float32Array {
+  let seed = 0x1234_5678;
+  const rnd = (): number => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+  const out = new Float32Array(n * 12); // 2 segments × 2 verts × 3 comps
+  const s = 0.004; // cross arm as a fraction of the unit radius
+  for (let i = 0; i < n; i++) {
+    // Uniform point on the sphere.
+    const z = 2 * rnd() - 1;
+    const phi = 2 * Math.PI * rnd();
+    const r = Math.sqrt(1 - z * z);
+    const c: [number, number, number] = [r * Math.cos(phi), r * Math.sin(phi), z];
+    // Two tangents for the cross arms.
+    const up: [number, number, number] = Math.abs(z) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+    const [t1x, t1y, t1z] = normCross(c, up);
+    const [t2x, t2y, t2z] = normCross(c, [t1x, t1y, t1z]);
+    const [cx, cy, cz] = c;
+    const b = i * 12;
+    out[b] = cx - t1x * s; out[b + 1] = cy - t1y * s; out[b + 2] = cz - t1z * s;
+    out[b + 3] = cx + t1x * s; out[b + 4] = cy + t1y * s; out[b + 5] = cz + t1z * s;
+    out[b + 6] = cx - t2x * s; out[b + 7] = cy - t2y * s; out[b + 8] = cz - t2z * s;
+    out[b + 9] = cx + t2x * s; out[b + 10] = cy + t2y * s; out[b + 11] = cz + t2z * s;
+  }
+  return out;
+}
+
+function normCross(a: [number, number, number], b: [number, number, number]): [number, number, number] {
+  const [ax, ay, az] = a;
+  const [bx, by, bz] = b;
+  const cx = ay * bz - az * by;
+  const cy = az * bx - ax * bz;
+  const cz = ax * by - ay * bx;
+  const m = Math.hypot(cx, cy, cz) || 1;
+  return [cx / m, cy / m, cz / m];
+}
 
 /** Flatten a compiled craft into renderable part instances. */
 function buildInstances(compiled: Compiled, craft: Craft): PartInstance[] {
